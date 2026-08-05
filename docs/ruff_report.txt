@@ -1,0 +1,21 @@
+VAOS Phase 2 -- ruff report
+Command: ruff check src tests --line-length 100
+Generated: 2026-08-05 05:37:10 UTC
+================================================================
+
+UP046 Generic class `Repository` uses `Generic` subclass instead of type parameters
+  --> src/domain/interfaces.py:19:23
+   |
+19 | class Repository(ABC, Generic[EntityT]):
+   |                       ^^^^^^^^^^^^^^^^
+20 |     """Abstract persistence Port for a single entity type.
+   |
+help: Use type parameters
+
+Found 1 error.
+No fixes available (1 hidden fix can be enabled with the `--unsafe-fixes` option).
+
+Note: the one UP046 finding (Repository's use of typing.Generic[T]
+rather than PEP 695 type-parameter syntax) is a deliberate, accepted
+style choice carried over from the Phase 1 audit -- Generic[T] is
+kept for broader readability/compatibility. It is not a defect.

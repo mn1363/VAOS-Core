@@ -1,0 +1,8 @@
+# VAOS application configuration.
+# Values here can be overridden by VAOS_* environment variables; see
+# src/core/config.py for the exact mapping.
+
+app_name: vaos
+app_version: "0.1.0"
+environment: development
+debug: false

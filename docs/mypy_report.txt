@@ -1,0 +1,10 @@
+VAOS Phase 2 -- mypy report
+Command: mypy src/core src/domain --strict
+Generated: 2026-08-05 05:37:10 UTC
+================================================================
+
+--- src/core + src/domain (strict) ---
+Success: no issues found in 11 source files
+
+--- tests (strict, informational) ---
+Success: no issues found in 14 source files
