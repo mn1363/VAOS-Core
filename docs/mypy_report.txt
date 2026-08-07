@@ -1,10 +1,13 @@
-VAOS Phase 3 -- mypy report
-Command: mypy src/core src/domain src/repository --strict
-Generated: 2026-08-06 03:54:29 UTC
+VAOS Phase 4 -- mypy report
+Command: mypy src/core src/domain src/repository src/collectors --strict
+Generated: 2026-08-07 11:06:27 UTC
 ================================================================
 
---- src/core + src/domain + src/repository (strict) ---
-Success: no issues found in 15 source files
+--- src/core + src/domain + src/repository + src/collectors (strict) ---
+Success: no issues found in 21 source files
+
+--- src/collectors only, scoped to this phase (strict) ---
+Success: no issues found in 6 source files
 
 --- tests (strict, informational) ---
-Success: no issues found in 18 source files
+Success: no issues found in 24 source files
