@@ -1,13 +1,13 @@
-VAOS Phase 5 -- mypy report
-Command: mypy src/core src/domain src/repository src/collectors src/parsers --strict --python-version 3.13
-Generated: 2026-08-08 10:14:17 UTC
+VAOS Phase 6 -- mypy report
+Command: mypy src/core src/domain src/repository src/collectors src/parsers src/extractors --strict --python-version 3.13
+Generated: 2026-08-09 03:18:21 UTC
 ================================================================
 
---- src/core + src/domain + src/repository + src/collectors + src/parsers (strict) ---
-Success: no issues found in 33 source files
+--- src/core + src/domain + src/repository + src/collectors + src/parsers + src/extractors (strict) ---
+Success: no issues found in 48 source files
 
---- src/parsers only, scoped to this phase (strict) ---
-Success: no issues found in 12 source files
+--- src/extractors only, scoped to this phase (strict) ---
+Success: no issues found in 15 source files
 
 --- tests (strict, informational) ---
-Success: no issues found in 36 source files
+Success: no issues found in 51 source files
