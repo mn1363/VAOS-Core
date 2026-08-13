@@ -1,8 +1,9 @@
-VAOS Phase 7 -- ruff report
-Command: ruff check src tests --line-length 100
-Generated: 2026-08-10 10:17:05 UTC
+VAOS Phase 8 -- ruff report
+Command: ruff check .
+Generated: 2026-08-11 03:19:49 UTC
 ================================================================
 
+--- . (whole repository) ---
 UP046 Generic class `Repository` uses `Generic` subclass instead of type parameters
   --> src/domain/interfaces.py:19:23
    |
@@ -15,20 +16,12 @@ help: Use type parameters
 Found 1 error.
 No fixes available (1 hidden fix can be enabled with the `--unsafe-fixes` option).
 
-----------------------------------------------------------------
-Scoped check -- this phase's actual editable scope only
-Command: ruff check src/analyzers tests/unit/analyzers --line-length 100
-----------------------------------------------------------------
-
+--- src/graph + tests/unit/graph only, scoped to this phase ---
 All checks passed!
 
 Note: the one project-wide finding above (UP046 on Repository's
-Generic[T] base in src/domain/interfaces.py) is pre-existing from
-Phase 2, lives outside this phase's scope (Implement only files
-under: src/analyzers/), and was already reviewed and accepted as a
-deliberate style choice in the Phase 2 audit (and again noted, still
-untouched, in the Phase 4, Phase 5, and Phase 6 audits) -- it was
-left untouched per this phase's explicit instruction not to modify
-anything outside src/analyzers/. Within src/analyzers/ and
-tests/unit/analyzers/ -- this phase's actual deliverable -- ruff is
-fully clean, as shown in the scoped check above.
+Generic[EntityT] base in src/domain/interfaces.py, a frozen Phase 2
+file) is pre-existing -- first reported in Phase 6's and Phase 7's own
+ruff_report.txt -- and out of scope for this phase, which does not
+modify Phase 1-7 implementation. Nothing in src/graph or
+tests/unit/graph triggers any ruff finding.
