@@ -1,9 +1,14 @@
-VAOS Phase 8 -- ruff report
-Command: ruff check .
-Generated: 2026-08-11 03:19:49 UTC
-================================================================
+ruff check report -- Phase 9 (src/foundation, tests/unit/foundation)
+=====================================================================
+All checks passed!
 
---- . (whole repository) ---
+=====================================================================
+ruff check report -- full repository (src, tests), Phase 1-9 combined
+=====================================================================
+(one pre-existing UP046 finding in frozen src/domain/interfaces.py predates Phase 9
+ and is unrelated to it -- present in the Phase 8 baseline before any Phase 9 file
+ was written; see phase9_summary.md for the baseline confirmation.)
+
 UP046 Generic class `Repository` uses `Generic` subclass instead of type parameters
   --> src/domain/interfaces.py:19:23
    |
@@ -15,13 +20,3 @@ help: Use type parameters
 
 Found 1 error.
 No fixes available (1 hidden fix can be enabled with the `--unsafe-fixes` option).
-
---- src/graph + tests/unit/graph only, scoped to this phase ---
-All checks passed!
-
-Note: the one project-wide finding above (UP046 on Repository's
-Generic[EntityT] base in src/domain/interfaces.py, a frozen Phase 2
-file) is pre-existing -- first reported in Phase 6's and Phase 7's own
-ruff_report.txt -- and out of scope for this phase, which does not
-modify Phase 1-7 implementation. Nothing in src/graph or
-tests/unit/graph triggers any ruff finding.

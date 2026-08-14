@@ -1,13 +1,8 @@
-VAOS Phase 8 -- mypy report
-Command: mypy src --strict --python-version 3.13
-Generated: 2026-08-11 03:19:49 UTC
-================================================================
+mypy --strict report -- Phase 9 (src/foundation, tests/unit/foundation)
+=====================================================================
+Success: no issues found in 24 source files
 
---- src (core + domain + repository + collectors + parsers + extractors + analyzers + graph) (strict) ---
-Success: no issues found in 75 source files
-
---- src/graph only, scoped to this phase (strict) ---
-Success: no issues found in 9 source files
-
---- tests (strict, informational) ---
-Success: no issues found in 77 source files
+=====================================================================
+mypy --strict report -- full repository (src, tests), Phase 1-9 combined
+=====================================================================
+Success: no issues found in 176 source files
