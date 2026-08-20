@@ -1,8 +1,8 @@
-mypy --strict report -- Phase 9 (src/foundation, tests/unit/foundation)
+mypy --strict --python-version 3.13 report -- Phase 11 (src/vector, tests/unit/vector)
 =====================================================================
-Success: no issues found in 24 source files
+Success: no issues found in 6 source files
 
 =====================================================================
-mypy --strict report -- full repository (src, tests), Phase 1-9 combined
+mypy --strict --python-version 3.13 report -- full repository (src, tests), Phase 1-9, 11 combined
 =====================================================================
-Success: no issues found in 176 source files
+Success: no issues found in 182 source files
