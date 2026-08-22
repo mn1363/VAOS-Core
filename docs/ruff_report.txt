@@ -1,12 +1,14 @@
-ruff check report -- Phase 11 (src/vector, tests/unit/vector)
+ruff check report -- Phase 10 (src/storage, tests/unit/storage)
 =====================================================================
 All checks passed!
 
 =====================================================================
-ruff check report -- full repository (src, tests), Phase 1-9, 11 combined
+ruff check report -- full repository (src, tests), Phase 1-9, 10, 11 combined
 =====================================================================
-(one pre-existing UP046 finding in frozen src/domain/interfaces.py predates Phase 9
- and is unrelated to Phase 11 -- see phase9_summary.md for the baseline confirmation.)
+(one pre-existing UP046 finding in frozen src/domain/interfaces.py predates
+ Phase 9, reconfirmed unchanged by Phase 11 and again by Phase 10 -- see
+ phase9_summary.md for the baseline confirmation. Unrelated to today's
+ dependency declaration.)
 
 UP046 Generic class `Repository` uses `Generic` subclass instead of type parameters
   --> src/domain/interfaces.py:19:23

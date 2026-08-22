@@ -5,6 +5,8 @@ description = "VAOS -- Phase 1: Core layer"
 requires-python = ">=3.13"
 dependencies = [
     "pyyaml>=6.0",
+    "asyncpg>=0.30,<0.31",
+    "qdrant-client>=1.9,<1.10",
 ]
 
 [project.optional-dependencies]
