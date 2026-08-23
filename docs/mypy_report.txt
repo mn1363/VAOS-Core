@@ -1,17 +1,1 @@
-mypy --strict --python-version 3.13 report -- Phase 10 (src/storage, tests/unit/storage)
-=====================================================================
-Success: no issues found in 23 source files
-
-=====================================================================
-mypy --strict --python-version 3.13 report -- full repository (src, tests), Phase 1-9, 10, 11 combined
-=====================================================================
-Success: no issues found in 205 source files
-
-=====================================================================
-Dependency-declaration note: asyncpg>=0.30,<0.31 and qdrant-client>=1.9,<1.10
-are now declared in [project.dependencies]. Both are already type-checked
-above as part of the full repository run -- storage.postgres.driver and
-storage.qdrant.driver type-check cleanly with these versions genuinely
-installed (asyncpg==0.30.0, qdrant-client==1.9.2), superseding the earlier
-"clean-environment confirmation" section this replaces, which existed only
-because the dependency was not yet declared.
+Success: no issues found in 211 source files
