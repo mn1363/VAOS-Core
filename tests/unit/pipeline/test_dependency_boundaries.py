@@ -13,6 +13,19 @@ foundation, storage, vector, memory) and does not name repository among them, ev
 repository is listed among the layers that must never import pipeline back. `core` and `domain`
 are included alongside those nine because every other already-frozen layer treats them as
 universally available foundational layers, not because this phase's brief names them specifically.
+
+Boundary-test correction (Phase 14): `test_no_other_layer_imports_pipeline` below now also
+exempts `src/application` from its scan, alongside `src/pipeline` itself. This module's own
+docstring, above, already named "a future, not-yet-built `application`/`cli`/`bootstrap` layer" as
+pipeline's intended assembler -- Phase 14's own instruction makes `application` that layer, and
+explicitly authorizes `Application -> Pipeline`. The original, Phase-13-era form of this test
+predated `src/application`'s existence and so had no way to distinguish a genuinely lower layer
+from a not-yet-built, already-anticipated outer one; without the exemption it produces a false
+positive against a dependency this phase's own architecture requires. This is a correction to what
+this test checks, not to Phase 13's own dependency rule or any Phase 13 production code -- neither
+was ever touched. See `test_only_lower_layers_are_barred_from_importing_pipeline` and
+`test_application_is_the_authorized_outer_consumer_of_pipeline`, further down, for the explicit,
+per-layer re-statement of this same rule the correction is paired with.
 """
 
 import ast
@@ -104,16 +117,76 @@ def test_pipeline_does_not_import_repository_anywhere() -> None:
 
 
 def test_no_other_layer_imports_pipeline() -> None:
-    """No module outside `src/pipeline` may import `src.pipeline` -- the dependency direction
-    must remain one-way, exactly as this phase's own brief requires. Scans the whole `src/` tree
-    rather than relying only on each already-frozen phase's own dependency-boundary test."""
+    """No *lower* layer may import `src.pipeline` -- the dependency direction from every layer
+    Phase 13 was built on top of (`core` through `memory`) into `pipeline` must remain one-way,
+    exactly as this phase's own brief requires. Scans the whole `src/` tree rather than relying
+    only on each already-frozen phase's own dependency-boundary test.
+
+    `src/application` is exempted from this scan, alongside `src/pipeline` itself: see this
+    module's own docstring, above, for why -- it is the one, explicitly authorized outer layer,
+    not a lower layer this rule was ever meant to guard against.
+    """
+    _application_root = _SRC_ROOT / "application"
     for path in _source_files(_SRC_ROOT):
         if _PIPELINE_ROOT in path.parents or path.parent == _PIPELINE_ROOT:
+            continue
+        if _application_root in path.parents or path.parent == _application_root:
             continue
         for module_name in _imported_module_names(path):
             assert not (module_name == "src.pipeline" or module_name.startswith("src.pipeline.")), (
                 f"{path} imports 'src.pipeline' -- no lower layer may depend on pipeline"
             )
+
+
+_LOWER_LAYER_NAMES = (
+    "core",
+    "domain",
+    "repository",
+    "collectors",
+    "parsers",
+    "extractors",
+    "analyzers",
+    "graph",
+    "foundation",
+    "storage",
+    "vector",
+    "memory",
+)
+
+
+@pytest.mark.parametrize("layer_name", _LOWER_LAYER_NAMES)
+def test_only_lower_layers_are_barred_from_importing_pipeline(layer_name: str) -> None:
+    """Explicit, per-layer re-statement of `test_no_other_layer_imports_pipeline`'s rule, one
+    lower layer at a time, so a regression names the exact offending layer rather than only the
+    offending file. Covers every one of the twelve layers barred from importing pipeline --
+    `core`, `domain`, `repository`, `collectors`, `parsers`, `extractors`, `analyzers`, `graph`,
+    `foundation`, `storage`, `vector`, `memory` -- deliberately excluding `application`, the one
+    layer this correction authorizes.
+    """
+    layer_root = _SRC_ROOT / layer_name
+    for path in _source_files(layer_root):
+        for module_name in _imported_module_names(path):
+            assert not (module_name == "src.pipeline" or module_name.startswith("src.pipeline.")), (
+                f"{path} imports 'src.pipeline' -- '{layer_name}' is a lower layer and must not "
+                "depend on pipeline"
+            )
+
+
+def test_application_is_the_authorized_outer_consumer_of_pipeline() -> None:
+    """Positive counterpart to `test_only_lower_layers_are_barred_from_importing_pipeline`: proves
+    `src.application` genuinely does import `src.pipeline` -- the one direction Phase 14 explicitly
+    authorizes ("Application -> Pipeline") and this module's own docstring already anticipated
+    pipeline needing. A `src/application` that stopped importing `src.pipeline` would silently
+    make this whole correction moot, so this asserts the dependency is real and exercised, not
+    merely unforbidden.
+    """
+    application_root = _SRC_ROOT / "application"
+    imports_pipeline = any(
+        module_name == "src.pipeline" or module_name.startswith("src.pipeline.")
+        for path in _source_files(application_root)
+        for module_name in _imported_module_names(path)
+    )
+    assert imports_pipeline, "src.application does not import src.pipeline anywhere"
 
 
 def _internal_relative_imports(path: Path) -> list[str]:
