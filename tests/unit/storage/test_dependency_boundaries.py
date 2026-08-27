@@ -150,9 +150,25 @@ def test_nothing_outside_storage_imports_from_storage() -> None:
     """No already-frozen `src` package may import anything from `src.storage` -- it is meant to
     sit as an outer/leaf layer nothing else in this codebase depends on, the same relationship
     `tests.unit.vector.test_dependency_boundaries.
-    test_vector_does_not_import_storage_anywhere` establishes in the opposite direction."""
+    test_vector_does_not_import_storage_anywhere` establishes in the opposite direction.
+
+    Boundary-test correction (Phase 15): `src/bootstrap` is exempted from this scan. Storage was
+    an outer/leaf layer relative to every layer built through Phase 14 -- none of them was ever
+    authorized to construct a concrete storage backend directly, `application` included, which
+    explicitly declined to (see `application.runner`'s own module docstring). Phase 15's own,
+    approved contract makes `bootstrap` the first and only layer authorized to do so: it is
+    `bootstrap`'s literal job to select and construct the concrete `storage` backend a
+    configuration selects. The original, Phase-10-era form of this test predated `src/bootstrap`'s
+    existence and so had no way to anticipate a legitimate outer consumer; without the exemption
+    it produces a false positive against a dependency this phase's own architecture requires. This
+    is a correction to what this test checks, not to Phase 10's own dependency rule or any Phase
+    1-14 production code -- neither was touched.
+    """
+    _bootstrap_root = _SRC_ROOT / "bootstrap"
     for path in sorted(_SRC_ROOT.rglob("*.py")):
         if path.is_relative_to(_STORAGE_ROOT):
+            continue
+        if path.is_relative_to(_bootstrap_root):
             continue
         for module_name in _imported_module_names(path):
             is_storage_import = module_name == "src.storage" or module_name.startswith(

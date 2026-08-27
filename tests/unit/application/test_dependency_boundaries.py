@@ -95,9 +95,25 @@ def test_no_other_layer_imports_application() -> None:
     """No module outside `src/application` may import `src.application` -- the dependency
     direction must remain one-way, exactly as this phase's own instruction requires ("No Phase
     1-13 layer may import src.application"). Scans the whole `src/` tree rather than relying only
-    on each already-frozen phase's own dependency-boundary test."""
+    on each already-frozen phase's own dependency-boundary test.
+
+    Boundary-test correction (Phase 15): `src/bootstrap` is exempted from this scan. This
+    module's own `__init__.py` already named `bootstrap` as one of the three layers -- alongside
+    `application` and `cli` -- sharing `pipeline`'s own "assemble a flow" gap; Phase 15's own,
+    approved contract explicitly authorizes `Bootstrap -> Application`, calling
+    `application.build_pipeline`/`application.run_flow` directly. The original, Phase-14-era
+    form of this test predated `src/bootstrap`'s existence and had no way to distinguish it from
+    a genuinely lower layer; without the exemption it produces a false positive against a
+    dependency this phase's own architecture requires. This is a correction to what this test
+    checks, not to Phase 14's own dependency rule or any Phase 1-14 production code -- neither
+    was touched, mirroring the identical, already-established correction
+    `tests/unit/pipeline/test_dependency_boundaries.py` made for `application` itself in Phase 14.
+    """
+    _bootstrap_root = _SRC_ROOT / "bootstrap"
     for path in _source_files(_SRC_ROOT):
         if _APPLICATION_ROOT in path.parents or path.parent == _APPLICATION_ROOT:
+            continue
+        if _bootstrap_root in path.parents or path.parent == _bootstrap_root:
             continue
         for module_name in _imported_module_names(path):
             is_application = module_name == "src.application" or module_name.startswith(

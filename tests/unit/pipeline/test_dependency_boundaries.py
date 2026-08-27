@@ -26,6 +26,9 @@ this test checks, not to Phase 13's own dependency rule or any Phase 13 producti
 was ever touched. See `test_only_lower_layers_are_barred_from_importing_pipeline` and
 `test_application_is_the_authorized_outer_consumer_of_pipeline`, further down, for the explicit,
 per-layer re-statement of this same rule the correction is paired with.
+
+Boundary-test correction (Phase 15): the same exemption now also covers `src/bootstrap`, for the
+identical reason -- see `test_no_other_layer_imports_pipeline`'s own docstring, below, for detail.
 """
 
 import ast
@@ -125,12 +128,26 @@ def test_no_other_layer_imports_pipeline() -> None:
     `src/application` is exempted from this scan, alongside `src/pipeline` itself: see this
     module's own docstring, above, for why -- it is the one, explicitly authorized outer layer,
     not a lower layer this rule was ever meant to guard against.
+
+    Boundary-test correction (Phase 15): `src/bootstrap` is exempted for the identical reason.
+    This module's own docstring already named `bootstrap` as one of the three layers sharing
+    pipeline's own "assemble a flow" gap, alongside `application` and `cli`; Phase 15's own
+    instruction makes `bootstrap` the second of those three to exist, and its approved contract
+    explicitly authorizes `Bootstrap -> Pipeline` (via `Bootstrap -> Application -> Pipeline`).
+    The original, Phase-14-era form of this exemption predated `src/bootstrap`'s existence and so
+    had no way to distinguish it from a genuinely lower layer either; without widening the
+    exemption it produces the same false positive against `bootstrap` that it once did against
+    `application`. This is a correction to what this test checks, not to Phase 13's own
+    dependency rule or any Phase 1-14 production code -- neither was touched.
     """
     _application_root = _SRC_ROOT / "application"
+    _bootstrap_root = _SRC_ROOT / "bootstrap"
     for path in _source_files(_SRC_ROOT):
         if _PIPELINE_ROOT in path.parents or path.parent == _PIPELINE_ROOT:
             continue
         if _application_root in path.parents or path.parent == _application_root:
+            continue
+        if _bootstrap_root in path.parents or path.parent == _bootstrap_root:
             continue
         for module_name in _imported_module_names(path):
             assert not (module_name == "src.pipeline" or module_name.startswith("src.pipeline.")), (
