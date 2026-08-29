@@ -14,6 +14,11 @@ three not-yet-built packages every other phase's own dependency-boundary test al
 `src.api`, `src.cli`, `src.plugins`. `src.bootstrap` does not forbid itself, and no evidence
 anywhere connects `src.runtime`, `src.infrastructure`, or `src.scorers` to this layer as an
 actual dependency -- see the Phase 15 contract discovery this phase was built from.
+
+Boundary-test correction (Phase 16): `src/cli` is exempted from `test_no_other_layer_imports_
+bootstrap` below -- `cli` is the one, now-authorized outer layer that legitimately calls
+`bootstrap.bootstrap`, exactly the same kind of correction `test_no_other_layer_imports_pipeline`
+already carries for `src/application` and `src/bootstrap` itself.
 """
 
 import ast
@@ -92,12 +97,17 @@ def test_bootstrap_module_imports_only_allowed_layers(path: Path) -> None:
 
 
 def test_no_other_layer_imports_bootstrap() -> None:
-    """No module outside `src/bootstrap` may import `src.bootstrap` -- the dependency direction
+    """No module outside `src/bootstrap` -- other than the now-authorized `src/cli` (Phase 16) --
+    may import `src.bootstrap`. `src/cli` is exempted below because Phase 16's own architectural
+    decision explicitly requires `cli -> bootstrap`; every other layer's dependency direction
     must remain one-way, exactly as this phase's own instruction requires ("No Phase 1-14
     package may import src.bootstrap"). Scans the whole `src/` tree rather than relying only on
     each already-frozen phase's own dependency-boundary test."""
+    _cli_root = _SRC_ROOT / "cli"
     for path in _source_files(_SRC_ROOT):
         if _BOOTSTRAP_ROOT in path.parents or path.parent == _BOOTSTRAP_ROOT:
+            continue
+        if _cli_root in path.parents or path.parent == _cli_root:
             continue
         for module_name in _imported_module_names(path):
             is_bootstrap = module_name == "src.bootstrap" or module_name.startswith(
