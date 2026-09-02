@@ -35,6 +35,14 @@ identical reason -- `cli` is the third and final of the three layers this module
 named as sharing pipeline's "assemble a flow" gap, and Phase 16's own instruction explicitly
 authorizes `CLI -> Bootstrap -> Application -> Pipeline`. See `test_no_other_layer_imports_
 pipeline`'s own docstring, below, for detail.
+
+Boundary-test correction (Phase 18): the same exemption now also covers `src/plugins`, for a
+different reason than the three above -- `plugins` is not an assembler of this module's "future
+`application`/`cli`/`bootstrap` layer" gap, but Phase 18's own `Plugin` is a named subtype of this
+module's own `Step`, and subclassing it requires `from src.pipeline.base import Step`. Phase 18's
+approved contract explicitly authorizes exactly this one edge, `Plugins -> Pipeline`, and nothing
+else `src/plugins` imports. See `test_no_other_layer_imports_pipeline`'s own docstring, below, for
+detail.
 """
 
 import ast
@@ -153,10 +161,19 @@ def test_no_other_layer_imports_pipeline() -> None:
     this test had no way to distinguish from a genuinely lower layer's. This is a correction to
     what this test checks, not to Phase 13's own dependency rule or any Phase 1-15 production
     code -- neither was touched.
+
+    Boundary-test correction (Phase 18): `src/plugins` is exempted for a different reason than
+    the three above -- it is not an assembler sharing pipeline's "assemble a flow" gap, but
+    Phase 18's own `Plugin(Step, ABC)` is a named subtype of this module's own `Step` and must
+    import it to subclass it. Phase 18's approved contract explicitly authorizes exactly this one
+    edge, `Plugins -> Pipeline`, and nothing else `src/plugins` imports. This is a correction to
+    what this test checks, not to Phase 13's own dependency rule or any Phase 1-17 production
+    code -- neither was touched.
     """
     _application_root = _SRC_ROOT / "application"
     _bootstrap_root = _SRC_ROOT / "bootstrap"
     _cli_root = _SRC_ROOT / "cli"
+    _plugins_root = _SRC_ROOT / "plugins"
     for path in _source_files(_SRC_ROOT):
         if _PIPELINE_ROOT in path.parents or path.parent == _PIPELINE_ROOT:
             continue
@@ -165,6 +182,8 @@ def test_no_other_layer_imports_pipeline() -> None:
         if _bootstrap_root in path.parents or path.parent == _bootstrap_root:
             continue
         if _cli_root in path.parents or path.parent == _cli_root:
+            continue
+        if _plugins_root in path.parents or path.parent == _plugins_root:
             continue
         for module_name in _imported_module_names(path):
             assert not (module_name == "src.pipeline" or module_name.startswith("src.pipeline.")), (
