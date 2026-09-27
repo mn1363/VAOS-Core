@@ -84,6 +84,19 @@ def test_build_parser_rejects_unknown_argument_with_usage_error(
     assert "vaos: error:" in capsys.readouterr().err
 
 
+def test_build_parser_analyze_flag_defaults_to_false() -> None:
+    """Omitting `--analyze` parses to `False` -- the exact value `_run` must treat as "run only
+    the default three-step flow"."""
+    args = cli_main.build_parser().parse_args([])
+    assert args.analyze is False
+
+
+def test_build_parser_accepts_analyze_flag() -> None:
+    """`--analyze` is a plain `action="store_true"` flag: present means `True`, no value taken."""
+    args = cli_main.build_parser().parse_args(["--analyze"])
+    assert args.analyze is True
+
+
 # --------------------------------------------------------------------------------------
 # main() -- exit codes and stderr/stdout routing, via a fake `bootstrap`/`load_config`
 # --------------------------------------------------------------------------------------
@@ -200,6 +213,223 @@ def test_main_defaults_config_path_to_none_when_flag_omitted(
     cli_main.main([])
 
     assert seen == [None]
+
+
+# --------------------------------------------------------------------------------------
+# --analyze -- default-flow preservation (no --analyze given)
+# --------------------------------------------------------------------------------------
+
+
+def test_main_without_analyze_does_not_call_build_analysis_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Omitting `--analyze` must never construct the analysis composition -- the exact
+    invariant this milestone must preserve, checked directly rather than only inferred from
+    `bootstrap`'s own call shape below."""
+    calls: list[AppConfig] = []
+
+    def _recording_build_analysis_steps(config: AppConfig) -> list[str]:
+        calls.append(config)
+        return []
+
+    async def _fake_bootstrap(config: AppConfig, **kwargs: object) -> PipelineResult:
+        return _result()
+
+    monkeypatch.setattr(cli_main, "load_config", lambda path: AppConfig())
+    monkeypatch.setattr(cli_main, "build_analysis_steps", _recording_build_analysis_steps)
+    monkeypatch.setattr(cli_main, "bootstrap", _fake_bootstrap)
+
+    exit_code = cli_main.main([])
+
+    assert exit_code == 0
+    assert calls == []
+
+
+def test_main_without_analyze_calls_bootstrap_without_extra_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without `--analyze`, `_run` must call `bootstrap(config)` with no `extra_steps` --
+    byte-identical to the call that existed before this flag did."""
+    seen_kwargs: list[dict[str, object]] = []
+
+    async def _recording_bootstrap(config: AppConfig, **kwargs: object) -> PipelineResult:
+        seen_kwargs.append(kwargs)
+        return _result()
+
+    monkeypatch.setattr(cli_main, "load_config", lambda path: AppConfig())
+    monkeypatch.setattr(cli_main, "bootstrap", _recording_bootstrap)
+
+    exit_code = cli_main.main([])
+
+    assert exit_code == 0
+    assert seen_kwargs == [{}]
+
+
+# --------------------------------------------------------------------------------------
+# --analyze -- analysis-flow attachment (--analyze given)
+# --------------------------------------------------------------------------------------
+
+
+def test_main_with_analyze_calls_build_analysis_steps_with_the_loaded_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--analyze` must construct the composition from the exact same `AppConfig` `_run` loaded,
+    not a freshly reloaded or default one."""
+    loaded_config = AppConfig()
+    seen_configs: list[AppConfig] = []
+
+    def _recording_build_analysis_steps(config: AppConfig) -> list[str]:
+        seen_configs.append(config)
+        return []
+
+    async def _fake_bootstrap(config: AppConfig, **kwargs: object) -> PipelineResult:
+        return _result()
+
+    monkeypatch.setattr(cli_main, "load_config", lambda path: loaded_config)
+    monkeypatch.setattr(cli_main, "build_analysis_steps", _recording_build_analysis_steps)
+    monkeypatch.setattr(cli_main, "bootstrap", _fake_bootstrap)
+
+    exit_code = cli_main.main(["--analyze"])
+
+    assert exit_code == 0
+    assert seen_configs == [loaded_config]
+
+
+def test_main_with_analyze_passes_build_analysis_steps_output_as_extra_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`--analyze` must pass exactly `build_analysis_steps(config)`'s own return value through
+    as `bootstrap`'s `extra_steps` keyword argument -- no wrapping, filtering, or reordering."""
+    sentinel_steps = ["sentinel_step_one", "sentinel_step_two"]
+    seen_kwargs: list[dict[str, object]] = []
+
+    def _fake_build_analysis_steps(config: AppConfig) -> list[str]:
+        return sentinel_steps
+
+    async def _recording_bootstrap(config: AppConfig, **kwargs: object) -> PipelineResult:
+        seen_kwargs.append(kwargs)
+        return _result()
+
+    monkeypatch.setattr(cli_main, "load_config", lambda path: AppConfig())
+    monkeypatch.setattr(cli_main, "build_analysis_steps", _fake_build_analysis_steps)
+    monkeypatch.setattr(cli_main, "bootstrap", _recording_bootstrap)
+
+    exit_code = cli_main.main(["--analyze"])
+
+    assert exit_code == 0
+    assert seen_kwargs == [{"extra_steps": sentinel_steps}]
+
+
+# --------------------------------------------------------------------------------------
+# --analyze -- success output (reuses _format_result, unchanged)
+# --------------------------------------------------------------------------------------
+
+
+def test_main_with_analyze_prints_the_full_fourteen_step_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A successful analysis-mode run renders through the existing, unchanged
+    `_format_result` -- the same one-line summary the default flow already uses, now naming all
+    fourteen steps `build_analysis_steps` documents. No result-context data (any of the six
+    extraction-result keys) is ever printed."""
+    step_names = (
+        "collect",
+        "unpack_repositories",
+        "persist_repositories",
+        "require_single_repository",
+        "clone_repositories",
+        "enumerate_files",
+        "parse_files",
+        "select_successful_parse_results",
+        "extract_imports",
+        "extract_ast",
+        "extract_symbols",
+        "extract_architecture",
+        "extract_interfaces",
+        "extract_foundation",
+    )
+    fourteen_step_result = PipelineResult(
+        pipeline_name="bootstrap_default_flow",
+        step_outcomes=tuple(StepOutcome.ok(name) for name in step_names),
+        context=PipelineContext(),
+    )
+
+    async def _fake_bootstrap(config: AppConfig, **kwargs: object) -> PipelineResult:
+        return fourteen_step_result
+
+    monkeypatch.setattr(cli_main, "load_config", lambda path: AppConfig())
+    monkeypatch.setattr(cli_main, "build_analysis_steps", lambda config: [])
+    monkeypatch.setattr(cli_main, "bootstrap", _fake_bootstrap)
+
+    exit_code = cli_main.main(["--analyze"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert "14 step" in captured.out
+    for name in step_names:
+        assert name in captured.out
+    for forbidden in (
+        "import_results",
+        "ast_results",
+        "symbol_results",
+        "architecture_results",
+        "interface_results",
+        "foundation_results",
+    ):
+        assert forbidden not in captured.out
+
+
+# --------------------------------------------------------------------------------------
+# --analyze -- failure behavior (existing exception handling, unchanged)
+# --------------------------------------------------------------------------------------
+
+
+def test_main_with_analyze_returns_one_and_writes_stderr_on_vaos_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An analysis-mode `VAOSError` (e.g. the composition's own `BootstrapError`/
+    `StepExecutionError`) is caught by the same, unmodified `except VAOSError` branch the
+    default flow already uses."""
+
+    async def _raising_bootstrap(config: AppConfig, **kwargs: object) -> PipelineResult:
+        raise ValidationError(
+            "real-repository analysis composition is one-repository scoped, but 2 "
+            "repositories were collected"
+        )
+
+    monkeypatch.setattr(cli_main, "load_config", lambda path: AppConfig())
+    monkeypatch.setattr(cli_main, "build_analysis_steps", lambda config: [])
+    monkeypatch.setattr(cli_main, "bootstrap", _raising_bootstrap)
+
+    exit_code = cli_main.main(["--analyze"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "vaos: error:" in captured.err
+
+
+def test_main_with_analyze_returns_one_without_traceback_on_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An analysis-mode unexpected, non-`VAOSError` exception is caught by the same,
+    unmodified catch-all branch the default flow already uses -- exit code 1, no traceback."""
+
+    async def _raising_bootstrap(config: AppConfig, **kwargs: object) -> PipelineResult:
+        raise RuntimeError("something unrelated to VAOS broke during analysis")
+
+    monkeypatch.setattr(cli_main, "load_config", lambda path: AppConfig())
+    monkeypatch.setattr(cli_main, "build_analysis_steps", lambda config: [])
+    monkeypatch.setattr(cli_main, "bootstrap", _raising_bootstrap)
+
+    exit_code = cli_main.main(["--analyze"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "vaos: unexpected error:" in captured.err
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
 
 
 # --------------------------------------------------------------------------------------
