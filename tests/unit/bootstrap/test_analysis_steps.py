@@ -25,6 +25,7 @@ from src.bootstrap.analysis_steps import (
 from src.bootstrap.errors import BootstrapError
 from src.core.config import AppConfig
 from src.domain.entities import RepositoryProvider, SourceLanguage, SourceRepository
+from src.graph.architecture.structural import StructuralArchitectureGraphBuilder
 from src.parsers.base import FileMetadata, ParseResult, compute_content_hash
 from src.parsers.cpp.parser import CppParser
 from src.parsers.go.parser import GoParser
@@ -296,18 +297,21 @@ _EXPECTED_STEP_NAMES = [
     "extract_architecture",
     "extract_interfaces",
     "extract_foundation",
+    "build_architecture_graph",
 ]
+
+_PREVIOUS_ELEVEN_STEP_NAMES = _EXPECTED_STEP_NAMES[:11]
 
 
 def test_build_analysis_steps_exact_names(tmp_path: Path) -> None:
-    """The eleven returned steps carry exactly these names -- no more, no fewer, none renamed."""
+    """The twelve returned steps carry exactly these names -- no more, no fewer, none renamed."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
     assert sorted(step.name for step in steps) == sorted(_EXPECTED_STEP_NAMES)
 
 
 def test_build_analysis_steps_exact_order(tmp_path: Path) -> None:
-    """The eleven returned steps appear in this exact, fixed order."""
+    """The twelve returned steps appear in this exact, fixed order."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
     assert [step.name for step in steps] == _EXPECTED_STEP_NAMES
@@ -330,6 +334,7 @@ def test_build_analysis_steps_exact_is_async(tmp_path: Path) -> None:
         "extract_architecture": False,
         "extract_interfaces": False,
         "extract_foundation": False,
+        "build_architecture_graph": False,
     }
 
 
@@ -350,8 +355,50 @@ def test_build_analysis_steps_extractor_output_keys(tmp_path: Path) -> None:
     assert output_key_by_name["extract_foundation"] == "foundation_results"
 
 
-def test_build_analysis_steps_returns_exactly_eleven(tmp_path: Path) -> None:
-    """`build_analysis_steps` returns exactly eleven `Step`s -- no more, no fewer."""
+def test_build_analysis_steps_returns_exactly_twelve(tmp_path: Path) -> None:
+    """`build_analysis_steps` returns exactly twelve `Step`s -- no more, no fewer."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
-    assert len(steps) == 11
+    assert len(steps) == 12
+
+
+def test_build_analysis_steps_previous_eleven_keep_names_and_order(tmp_path: Path) -> None:
+    """The first eleven steps retain their exact pre-existing names and order."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    steps = build_analysis_steps(config)
+    assert [step.name for step in steps[:11]] == _PREVIOUS_ELEVEN_STEP_NAMES
+    assert _PREVIOUS_ELEVEN_STEP_NAMES == [
+        "require_single_repository",
+        "clone_repositories",
+        "enumerate_files",
+        "parse_files",
+        "select_successful_parse_results",
+        "extract_imports",
+        "extract_ast",
+        "extract_symbols",
+        "extract_architecture",
+        "extract_interfaces",
+        "extract_foundation",
+    ]
+
+
+def test_build_architecture_graph_is_the_last_step(tmp_path: Path) -> None:
+    """`build_architecture_graph` is the final step returned."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    steps = build_analysis_steps(config)
+    assert steps[-1].name == "build_architecture_graph"
+    assert [step.name for step in steps].count("build_architecture_graph") == 1
+
+
+def test_build_architecture_graph_step_contract(tmp_path: Path) -> None:
+    """The graph step is a synchronous `CallableStep` reading `architecture_results` and
+    writing `architecture_graph`, bound to `StructuralArchitectureGraphBuilder().build`."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    step = build_analysis_steps(config)[-1]
+    assert isinstance(step, CallableStep)
+    assert step._input_keys == ("architecture_results",)  # type: ignore[attr-defined]
+    assert step._output_key == "architecture_graph"  # type: ignore[attr-defined]
+    assert step._is_async is False  # type: ignore[attr-defined]
+    bound = step._func  # type: ignore[attr-defined]
+    assert isinstance(bound.__self__, StructuralArchitectureGraphBuilder)
+    assert bound.__func__ is StructuralArchitectureGraphBuilder.build

@@ -92,7 +92,7 @@ async def test_real_repository_analysis_executes_against_one_real_local_reposito
     tmp_path: Path,
 ) -> None:
     """The production `build_analysis_steps` composition, run through the real, unmodified
-    `bootstrap`, produces the exact 14-step sequence and real, structural results from all
+    `bootstrap`, produces the exact 15-step sequence and real, structural results from all
     six extractors against a real local repository."""
     if shutil.which("git") is None:
         pytest.skip("git executable not found on PATH")
@@ -133,6 +133,7 @@ async def test_real_repository_analysis_executes_against_one_real_local_reposito
         "extract_architecture",
         "extract_interfaces",
         "extract_foundation",
+        "build_architecture_graph",
     )
 
     files_to_parse = result.context.require("files_to_parse")

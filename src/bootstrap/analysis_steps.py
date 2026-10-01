@@ -2,7 +2,7 @@
 parse -> extract, promoted from the Reference Flow's own test-local composition (see
 `tests/integration/test_reference_flow.py`, "frozen as a milestone") into `src/bootstrap`.
 
-`build_analysis_steps` is this module's entire public surface: one function returning the eleven
+`build_analysis_steps` is this module's entire public surface: one function returning the twelve
 additional `Step`s a caller appends via `bootstrap.wiring.bootstrap`/`build_application`'s own
 `extra_steps` parameter -- the only attachment point this module uses. It does not construct a
 `Pipeline` itself, does not call `Pipeline.run`, and does not modify `wiring.py`'s own three-step
@@ -54,6 +54,7 @@ from src.extractors.foundation.structural import StructuralFoundationExtractor
 from src.extractors.imports.structural import StructuralImportExtractor
 from src.extractors.interfaces.structural import StructuralInterfaceExtractor
 from src.extractors.symbols.structural import StructuralSymbolExtractor
+from src.graph.architecture.structural import StructuralArchitectureGraphBuilder
 from src.parsers.base import Parser, ParseResult
 from src.parsers.cpp.parser import CppParser
 from src.parsers.go.parser import GoParser
@@ -228,7 +229,7 @@ def _select_successful_parse_results(
 
 
 def build_analysis_steps(config: AppConfig) -> list[Step]:
-    """Construct the eleven additional `Step`s real-repository analysis composition needs.
+    """Construct the twelve additional `Step`s real-repository analysis composition needs.
 
     Every Port this milestone needs is constructed here from already-existing, already-frozen
     builders -- `wiring.build_repository_client`/`build_workspace_manager` -- or from direct
@@ -243,10 +244,11 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
             `build_application` already does for its own three default steps.
 
     Returns:
-        The eleven new `Step`s, in the fixed order: `require_single_repository`,
+        The twelve new `Step`s, in the fixed order: `require_single_repository`,
         `clone_repositories`, `enumerate_files`, `parse_files`, `select_successful_parse_results`,
         `extract_imports`, `extract_ast`, `extract_symbols`, `extract_architecture`,
-        `extract_interfaces`, `extract_foundation`.
+        `extract_interfaces`, `extract_foundation`, `build_architecture_graph`. The last step reads
+        `architecture_results` unfiltered and writes `architecture_graph`.
     """
     repository_client = build_repository_client(config)
     workspace_manager = build_workspace_manager(config)
@@ -319,6 +321,12 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
         input_key="successful_parse_results",
         output_key="foundation_results",
     )
+    build_architecture_graph_step: Step = CallableStep(
+        "build_architecture_graph",
+        StructuralArchitectureGraphBuilder().build,
+        input_keys=("architecture_results",),
+        output_key="architecture_graph",
+    )
 
     return [
         require_single_repository_step,
@@ -332,4 +340,5 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
         extract_architecture_step,
         extract_interfaces_step,
         extract_foundation_step,
+        build_architecture_graph_step,
     ]

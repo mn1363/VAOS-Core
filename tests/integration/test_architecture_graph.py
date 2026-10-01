@@ -1,11 +1,11 @@
 """Integration test: `StructuralArchitectureGraphBuilder` over real `architecture_results`.
 
 Proves that the concrete builder consumes the real, structural `architecture_results` produced by
-the existing real-repository analysis composition (`bootstrap(config,
-extra_steps=build_analysis_steps(config))`, unmodified) and assembles them into a valid,
-deterministic `ArchitectureGraph`. The builder is invoked directly on the context's own
-`architecture_results` after the composition's existing 14 steps have run -- no step is added to
-the composition, and nothing in `src/bootstrap` is touched.
+the real-repository analysis composition (`bootstrap(config,
+extra_steps=build_analysis_steps(config))`) and assembles them into a valid,
+deterministic `ArchitectureGraph`. The builder is also invoked directly on the context's own
+`architecture_results`, and proves that the composition's own final `build_architecture_graph`
+step (the 15th step) writes an equal `architecture_graph` into the context.
 
 Like every other integration test in this directory, this clones a real, local (no-network) git
 repository, so it needs the real `git` executable and is skipped, not failed, if one is
@@ -33,6 +33,7 @@ from src.bootstrap.analysis_steps import build_analysis_steps
 from src.bootstrap.wiring import bootstrap
 from src.core.config import AppConfig
 from src.extractors.architecture.base import ArchitectureExtractionResult, PackageUnit
+from src.extractors.architecture.structural import StructuralArchitectureExtractor
 from src.graph.architecture.base import (
     ArchitectureGraph,
     PackageContainmentEdge,
@@ -40,6 +41,7 @@ from src.graph.architecture.base import (
     ancestor_package_paths,
 )
 from src.graph.architecture.structural import StructuralArchitectureGraphBuilder
+from src.pipeline.base import PipelineResult
 
 
 def _config(raw: dict[str, object]) -> AppConfig:
@@ -109,10 +111,27 @@ def _make_source_repository(tmp_path: Path) -> Path:
     return source_repo
 
 
-async def _real_architecture_results(
-    source_repo: Path, tmp_path: Path, tag: str
-) -> tuple[ArchitectureExtractionResult, ...]:
-    """Run the existing 14-step composition and return its real `architecture_results`.
+_EXPECTED_STEP_NAMES = (
+    "collect",
+    "unpack_repositories",
+    "persist_repositories",
+    "require_single_repository",
+    "clone_repositories",
+    "enumerate_files",
+    "parse_files",
+    "select_successful_parse_results",
+    "extract_imports",
+    "extract_ast",
+    "extract_symbols",
+    "extract_architecture",
+    "extract_interfaces",
+    "extract_foundation",
+    "build_architecture_graph",
+)
+
+
+async def _run_analysis(source_repo: Path, tmp_path: Path, tag: str) -> PipelineResult:
+    """Run the real 15-step composition and return its `PipelineResult`.
 
     Each `tag` gets its own storage and workspace roots, so repeated runs are fully independent.
     """
@@ -127,7 +146,16 @@ async def _real_architecture_results(
         }
     )
     result = await bootstrap(config, extra_steps=build_analysis_steps(config))
-    assert len(result.step_names()) == 14
+    assert len(result.step_names()) == 15
+    assert result.step_names() == _EXPECTED_STEP_NAMES
+    return result
+
+
+async def _real_architecture_results(
+    source_repo: Path, tmp_path: Path, tag: str
+) -> tuple[ArchitectureExtractionResult, ...]:
+    """Run the real 15-step composition and return its real `architecture_results`."""
+    result = await _run_analysis(source_repo, tmp_path, tag)
     architecture_results: tuple[ArchitectureExtractionResult, ...] = result.context.require(
         "architecture_results"
     )
@@ -148,6 +176,56 @@ def _skip_without_git() -> None:
     """Skip the calling test if the real `git` executable is unavailable."""
     if shutil.which("git") is None:
         pytest.skip("git executable not found on PATH")
+
+
+@pytest.mark.asyncio
+async def test_composition_writes_architecture_graph_equal_to_direct_build(
+    tmp_path: Path,
+) -> None:
+    """The composition's own 15th step writes `architecture_graph`, equal to building directly
+    from the unchanged `architecture_results` still present in the context."""
+    _skip_without_git()
+    source_repo = _make_source_repository(tmp_path)
+    result = await _run_analysis(source_repo, tmp_path, "a")
+
+    assert result.step_names()[-1] == "build_architecture_graph"
+    architecture_results = result.context.require("architecture_results")
+    architecture_graph = result.context.require("architecture_graph")
+
+    assert isinstance(architecture_graph, ArchitectureGraph)
+    assert architecture_graph.node_count > 0
+    assert architecture_graph == StructuralArchitectureGraphBuilder().build(architecture_results)
+
+    # `architecture_results` remains available and unchanged: still one successful result per
+    # successfully parsed file, in the same order, and untouched by the graph step.
+    successful_parse_results = result.context.require("successful_parse_results")
+    assert len(architecture_results) == len(successful_parse_results)
+    assert [r.relative_path for r in architecture_results] == [
+        r.relative_path for r in successful_parse_results
+    ]
+    assert all(r.succeeded is True for r in architecture_results)
+    assert result.context.require("architecture_results") is architecture_results
+    assert architecture_results == tuple(
+        StructuralArchitectureExtractor().extract(parse_result)
+        for parse_result in successful_parse_results
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_independent_runs_produce_equal_architecture_graphs(tmp_path: Path) -> None:
+    """Two independent analysis runs each write an equal `architecture_graph`."""
+    _skip_without_git()
+    source_repo = _make_source_repository(tmp_path)
+    first = await _run_analysis(source_repo, tmp_path, "a")
+    second = await _run_analysis(source_repo, tmp_path, "b")
+
+    first_graph = first.context.require("architecture_graph")
+    second_graph = second.context.require("architecture_graph")
+    assert isinstance(first_graph, ArchitectureGraph)
+    assert first_graph == second_graph
+    assert first.context.require("architecture_results") == second.context.require(
+        "architecture_results"
+    )
 
 
 @pytest.mark.asyncio

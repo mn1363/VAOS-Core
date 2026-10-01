@@ -325,12 +325,12 @@ def test_main_with_analyze_passes_build_analysis_steps_output_as_extra_steps(
 # --------------------------------------------------------------------------------------
 
 
-def test_main_with_analyze_prints_the_full_fourteen_step_summary(
+def test_main_with_analyze_prints_the_full_fifteen_step_summary(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A successful analysis-mode run renders through the existing, unchanged
     `_format_result` -- the same one-line summary the default flow already uses, now naming all
-    fourteen steps `build_analysis_steps` documents. No result-context data (any of the six
+    fifteen steps `build_analysis_steps` documents. No result-context data (any of the six
     extraction-result keys) is ever printed."""
     step_names = (
         "collect",
@@ -347,15 +347,16 @@ def test_main_with_analyze_prints_the_full_fourteen_step_summary(
         "extract_architecture",
         "extract_interfaces",
         "extract_foundation",
+        "build_architecture_graph",
     )
-    fourteen_step_result = PipelineResult(
+    fifteen_step_result = PipelineResult(
         pipeline_name="bootstrap_default_flow",
         step_outcomes=tuple(StepOutcome.ok(name) for name in step_names),
         context=PipelineContext(),
     )
 
     async def _fake_bootstrap(config: AppConfig, **kwargs: object) -> PipelineResult:
-        return fourteen_step_result
+        return fifteen_step_result
 
     monkeypatch.setattr(cli_main, "load_config", lambda path: AppConfig())
     monkeypatch.setattr(cli_main, "build_analysis_steps", lambda config: [])
@@ -366,7 +367,7 @@ def test_main_with_analyze_prints_the_full_fourteen_step_summary(
     captured = capsys.readouterr()
     assert exit_code == 0
     assert captured.err == ""
-    assert "14 step" in captured.out
+    assert "15 step" in captured.out
     for name in step_names:
         assert name in captured.out
     for forbidden in (
