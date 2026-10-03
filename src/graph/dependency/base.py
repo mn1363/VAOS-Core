@@ -14,11 +14,14 @@ because a `DependencyProfile` already collapses every file's edges down to aggre
 a deduplicated `external_targets` tuple, discarding the per-edge, per-line detail -- and every
 internal edge outright -- a graph needs to represent actual source-to-target relationships.
 
-Resolving an internal edge's `target_module` to one of the other files present in the same build
-call is this Port's job (not extraction or parsing): each `DependencyNode` and its `kind` records
-the outcome plainly rather than guessing, distinguishing a resolved internal file from an
-internal target this Port's input didn't happen to include (`UNRESOLVED_INTERNAL`) from a genuine
-external dependency (`EXTERNAL_MODULE`). This Port does not parse source code, extract import
+Resolving an edge's `target_module` to one of the files present in the same build call is this
+Port's job (not extraction or parsing): each `DependencyNode` and its `kind` records the outcome
+plainly rather than guessing, distinguishing a target resolved to an input file (`INTERNAL_FILE`)
+from an internal-candidate target this Port's input didn't happen to include
+(`UNRESOLVED_INTERNAL`) from a target that was not resolved to any input file
+(`EXTERNAL_MODULE`). The upstream `DependencyEdge.is_internal` flag is an input to that decision,
+not a value carried through: each output edge's `is_internal` is derived from the final target
+node's kind. This Port does not parse source code, extract import
 statements itself, or judge how healthy the resulting dependency structure is -- those are
 `parsers`, `extractors.imports`, and `analyzers.dependency`'s concerns respectively, each already
 built.
@@ -44,16 +47,20 @@ class DependencyNodeKind(StrEnum):
     """The three ways a `DependencyNode` can relate to the files this graph was built from."""
 
     INTERNAL_FILE = auto()
-    """One of the files this graph was built from -- present as a `source` of at least one
-    `DependencyRelationEdge`, and possibly also as a `target`."""
+    """One of the files this graph was built from. Every successful input file is an
+    `INTERNAL_FILE` node, including a file with zero imports (and so no edge at all); it may be
+    the `source` of any number of `DependencyRelationEdge`s and also a `target`."""
 
     EXTERNAL_MODULE = auto()
-    """A third-party or standard-library dependency target, never itself a `source`."""
+    """A target that was not resolved to any input file, never itself a `source`. This does not
+    by itself mean a known third-party or standard-library dependency: a first-party import the
+    builder had no rule to resolve is also recorded this way."""
 
     UNRESOLVED_INTERNAL = auto()
-    """An import an extractor marked `is_internal=True`, whose `target_module` did not match any
-    `INTERNAL_FILE` node among this graph's own inputs (e.g. the target file was not included in
-    the build call, or the target module string could not be matched to a known file path)."""
+    """An import an extractor marked `is_internal=True` (an internal candidate), whose
+    `target_module` did not match any `INTERNAL_FILE` node among this graph's own inputs (e.g.
+    the target file was not included in the build call, the target is not a single file, or the
+    target module string could not be matched to a known file path)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,8 +68,11 @@ class DependencyNode:
     """A single file or import target in a repository's dependency graph.
 
     Attributes:
-        identifier: For `INTERNAL_FILE`, the file's `relative_path`. For `EXTERNAL_MODULE` and
-            `UNRESOLVED_INTERNAL`, the raw `target_module` string an import referred to it by.
+        identifier: For `INTERNAL_FILE`, the file's `relative_path`, verbatim. For
+            `EXTERNAL_MODULE`, `external:` followed by the raw `target_module` string an import
+            referred to it by. For `UNRESOLVED_INTERNAL`, `unresolved:` followed by a payload
+            derived from the import's `target_module` (a concrete builder defines the payload).
+            The two prefixes keep the three kinds' identifiers from colliding.
         kind: Which of the three `DependencyNodeKind`s this node represents.
     """
 
@@ -86,8 +96,10 @@ class DependencyRelationEdge:
     Attributes:
         source: `DependencyNode.identifier` of the importing file. Always an `INTERNAL_FILE`.
         target: `DependencyNode.identifier` of the node being imported.
-        is_internal: Whether the extractor considered this import project-internal, carried
-            through from `extractors.imports.base.DependencyEdge.is_internal`.
+        is_internal: Whether this edge's `target` is not an `EXTERNAL_MODULE` node. It is derived
+            from the final target node's kind rather than carried through from
+            `extractors.imports.base.DependencyEdge.is_internal`, so it can differ from that
+            upstream flag.
         imported_names: The specific names imported, carried through from `DependencyEdge.
             imported_names`. Empty for a whole-module import.
         alias: The local alias the import was bound to, if any, carried through from
