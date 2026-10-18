@@ -136,19 +136,46 @@ test).
 
 ## Downstream duplicate subject/node identity limitation
 
-**Downstream, the concrete `foundation.comparer.build_subjects` may reject duplicate candidates.**
-It derives each `FoundationSubject.subject_id` from the repository plus
-`build_qualified_name(relative_path=..., name=...)` — no owner and no kind participate — and raises
-`ValidationError` when two candidates resolve to the same subject identity. The knowledge-graph
-Port uses the same scheme for capability node ids (`capability_node_id`) and its
-`KnowledgeGraph` rejects duplicate node identifiers. So a file that legitimately produces two
-candidates with one name — any of the duplicate sources above — is a valid extractor output that
-a downstream aggregation step can refuse. `build_subjects` also rejects a failed
-`FoundationExtractionResult` in its input, so returning a failed result would not avoid this.
+Three layers treat a duplicate `(relative_path, name)` candidate identity differently. They are
+deliberately separate, and none of them changes the extractor-level rules above.
 
-This is a downstream identity/aggregation concern. This per-file, mechanical extractor is not
-permitted to invent a solution for it — no deduplication, no identity change, no new field — and
-does not. Resolving it requires its own future contract decision at the aggregation layer.
+1. **This extractor preserves duplicates.** Every duplicate source above yields one candidate each,
+   exactly as parsed (see "Duplicates are preserved"). The extractor does not deduplicate, merge,
+   re-identify, or choose among them.
+2. **`foundation.comparer.build_subjects` still rejects duplicate subject identities.** It derives
+   each `FoundationSubject.subject_id` from the repository plus
+   `build_qualified_name(relative_path=..., name=...)` — no owner and no kind participate — and
+   raises `ValidationError` when two candidates resolve to the same subject identity. It also
+   rejects a failed `FoundationExtractionResult` in its input, so returning a failed result would
+   not avoid this. Unchanged: a file that legitimately produces two candidates with one name is a
+   valid extractor output that this aggregation step can refuse.
+3. **The Knowledge Graph builder may coalesce equivalent CAPABILITY candidates or reject
+   conflicts.** `StructuralKnowledgeGraphBuilder` maps each candidate to a `CAPABILITY` node whose
+   identifier is `capability_node_id` (the same `build_qualified_name`-based scheme). It groups
+   candidates by that identifier across all results and coalesces a multi-candidate group into one
+   node **only when every member has the same complete key `(relative_path, name, kind, signals)`**
+   (`kind` as the `FoundationCandidateKind` member, `signals` as an ordered tuple). `is_public`,
+   `has_docstring`, and `line_number` are ignored because the node does not project them. Any group
+   with a differing member — for example a class and a function sharing a name, which differ in
+   `kind` — is rejected whole, with every rejected group reported in one `ValidationError`. See
+   `docs/knowledge_graph_builder_summary.md` for the diagnostic contract.
+
+**Identifier equality is necessary but not sufficient.** The identifier joins `relative_path` and
+`name` with a delimiter, so different pairs can produce one identifier: `("a::b", "c")` and
+`("a", "b::c")` both give `capability:a::b::c`. The Knowledge Graph therefore compares the complete
+key (`relative_path`, `name`, `kind`, `signals`), not just the identifier, and treats such a pair as
+conflicting records.
+
+**Information lost.** Coalescing discards the number of source declarations and each
+declaration's line number, `is_public`, and `has_docstring`; one `CAPABILITY` node must not be read
+as one source declaration. The extractor's output remains the record of declarations. Because the
+layers differ, a duplicate that the Knowledge Graph accepts (overloads, a repeated `init`) can still
+be refused by `build_subjects`.
+
+This per-file, mechanical extractor is still not permitted to invent a solution for duplicates — no
+deduplication, no identity change, no new field — and does not. The frozen `KnowledgeGraph`
+validator also still rejects duplicate node identifiers when given them directly; the builder
+resolves identity groups before constructing the graph.
 
 ## Methods are excluded
 
