@@ -3,9 +3,11 @@
 Proves that `build_analysis_steps`, attached only through `bootstrap(config,
 extra_steps=build_analysis_steps(config))`, produces the same real, structural data the
 already-frozen Reference Flow and each single-extractor integration test already prove
-individually -- now composed together, from production code, in one milestone. Like every other
-integration test in this directory, this clones a real, local (no-network) git repository, so it
-needs the real `git` executable and is skipped, not failed, if one is unavailable.
+individually -- now composed together, from production code, in one milestone -- including the
+file-level `dependency_graph` the final `build_dependency_graph` step builds from `import_results`.
+Like every other integration test in this directory, this clones a real, local (no-network) git
+repository, so it needs the real `git` executable and is skipped, not failed, if one is
+unavailable.
 """
 
 from __future__ import annotations
@@ -27,6 +29,9 @@ from src.bootstrap.errors import BootstrapError
 from src.bootstrap.wiring import bootstrap, build_repository_client, build_workspace_manager
 from src.core.config import AppConfig
 from src.extractors.interfaces.base import InterfaceOrigin
+from src.graph.architecture.base import ArchitectureGraph
+from src.graph.dependency.base import DependencyGraph, DependencyNodeKind
+from src.graph.dependency.structural import StructuralDependencyGraphBuilder
 from src.pipeline.base import StepExecutionError
 
 
@@ -42,12 +47,14 @@ def _run_git(*args: str, cwd: Path) -> None:
 
 def _write_fixture_repository(root: Path) -> None:
     """Populate `root` with a fixture repository covering every case this milestone must
-    handle: a documented Python class/function, a Go source file, a TypeScript
-    interface/class pair, a nested directory, a dot-directory, an unsupported `README.md`,
-    and an undecodable-byte file -- then commit it."""
+    handle: a documented Python class/function (importing one standard-library module and one
+    first-party module), a Go source file, a TypeScript interface/class pair, a nested
+    directory, a dot-directory, an unsupported `README.md`, and an undecodable-byte file --
+    then commit it."""
     (root / "app.py").write_text(
         '"""Application entry point."""\n'
         "import os\n"
+        "from pkg.sub.util import helper\n"
         "\n"
         "\n"
         "class Base:\n"
@@ -92,7 +99,7 @@ async def test_real_repository_analysis_executes_against_one_real_local_reposito
     tmp_path: Path,
 ) -> None:
     """The production `build_analysis_steps` composition, run through the real, unmodified
-    `bootstrap`, produces the exact 15-step sequence and real, structural results from all
+    `bootstrap`, produces the exact 16-step sequence and real, structural results from all
     six extractors against a real local repository."""
     if shutil.which("git") is None:
         pytest.skip("git executable not found on PATH")
@@ -134,6 +141,7 @@ async def test_real_repository_analysis_executes_against_one_real_local_reposito
         "extract_interfaces",
         "extract_foundation",
         "build_architecture_graph",
+        "build_dependency_graph",
     )
 
     files_to_parse = result.context.require("files_to_parse")
@@ -197,6 +205,94 @@ async def test_real_repository_analysis_executes_against_one_real_local_reposito
 
 
 @pytest.mark.asyncio
+async def test_real_repository_analysis_produces_the_dependency_graph(tmp_path: Path) -> None:
+    """The final `build_dependency_graph` step writes a valid `DependencyGraph` under
+    `dependency_graph`: exactly what `StructuralDependencyGraphBuilder().build` returns for the
+    same `import_results`, with correct internal and external results, while every earlier
+    graph and extraction context key remains available."""
+    if shutil.which("git") is None:
+        pytest.skip("git executable not found on PATH")
+
+    source_repo = tmp_path / "source_repo"
+    source_repo.mkdir()
+    _run_git("init", cwd=source_repo)
+    _run_git("config", "user.email", "test@example.com", cwd=source_repo)
+    _run_git("config", "user.name", "Test", cwd=source_repo)
+    _run_git("checkout", "-b", "main", cwd=source_repo)
+    _write_fixture_repository(source_repo)
+
+    config = _config(
+        {
+            "collectors": {"backend": "filesystem", "source": str(source_repo)},
+            "storage": {
+                "backend": "filesystem",
+                "filesystem": {"root": str(tmp_path / "storage")},
+            },
+            "repository": {"workspace_root": str(tmp_path / "workspaces")},
+        }
+    )
+
+    result = await bootstrap(config, extra_steps=build_analysis_steps(config))
+
+    # the dependency graph step is the one new step, appended after the architecture graph step.
+    assert result.step_count == 16
+    assert result.step_names()[-2:] == ("build_architecture_graph", "build_dependency_graph")
+
+    # every earlier graph and extraction key is still available alongside the new one.
+    for key in (
+        "repositories",
+        "workspaces",
+        "files_to_parse",
+        "parse_results",
+        "successful_parse_results",
+        "import_results",
+        "ast_results",
+        "symbol_results",
+        "architecture_results",
+        "interface_results",
+        "foundation_results",
+        "architecture_graph",
+        "dependency_graph",
+    ):
+        assert result.context.has(key), key
+    assert isinstance(result.context.require("architecture_graph"), ArchitectureGraph)
+
+    # a valid DependencyGraph (its own `__post_init__` validation already ran on construction).
+    dependency_graph = result.context.require("dependency_graph")
+    assert isinstance(dependency_graph, DependencyGraph)
+
+    # exactly the builder's own output for the same `import_results` -- nothing added or dropped.
+    import_results = result.context.require("import_results")
+    assert dependency_graph == StructuralDependencyGraphBuilder().build(import_results)
+    assert dependency_graph.edge_count == sum(len(r.edges) for r in import_results)
+
+    # every successfully parsed file is exactly one INTERNAL_FILE node.
+    successful_paths = {
+        r.relative_path for r in result.context.require("successful_parse_results")
+    }
+    internal_file_nodes = {
+        node.identifier
+        for node in dependency_graph.nodes
+        if node.kind is DependencyNodeKind.INTERNAL_FILE
+    }
+    assert internal_file_nodes == successful_paths
+
+    # representative internal and external results, spelled with this platform's own separators.
+    util_path = str(Path("pkg") / "sub" / "util.py")
+    app_edges = {edge.target: edge for edge in dependency_graph.outgoing_edges("app.py")}
+    assert set(app_edges) == {"external:os", util_path}
+
+    internal_edge = app_edges[util_path]
+    assert internal_edge.is_internal is True
+    assert internal_edge.imported_names == ("helper",)
+    assert dependency_graph.get_node(util_path).kind is DependencyNodeKind.INTERNAL_FILE
+
+    external_edge = app_edges["external:os"]
+    assert external_edge.is_internal is False
+    assert dependency_graph.get_node("external:os").kind is DependencyNodeKind.EXTERNAL_MODULE
+
+
+@pytest.mark.asyncio
 async def test_real_repository_analysis_is_deterministic_across_repeated_runs(
     tmp_path: Path,
 ) -> None:
@@ -238,6 +334,7 @@ async def test_real_repository_analysis_is_deterministic_across_repeated_runs(
         "architecture_results",
         "interface_results",
         "foundation_results",
+        "dependency_graph",
     ):
         assert first.require(key) == second.require(key)
 

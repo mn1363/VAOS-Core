@@ -4,9 +4,11 @@ Proves that the concrete builder consumes the real, structural `import_results` 
 real-repository analysis composition (`bootstrap(config, extra_steps=build_analysis_steps(config))`
 -- the real file enumeration, the real five parsers, and the real `StructuralImportExtractor`) over
 a small, real, local (no-network) git repository, and assembles them into a valid, deterministic
-`DependencyGraph`. The builder is invoked directly on the context's own `import_results`; the
-composition itself is not modified and still has exactly its fifteen existing steps -- there is no
-dependency-graph step.
+`DependencyGraph`. The builder is invoked directly on the context's own `import_results`, which
+keeps this module's builder-contract coverage independent of the composition. The composition
+itself now ends with a sixteenth step, `build_dependency_graph`, which runs that same builder
+over the same `import_results` and writes the result under `dependency_graph`; one test below
+proves the two are equal.
 
 Like every other integration test in this directory, this clones a real, local git repository, so
 it needs the real `git` executable and is skipped, not failed, if one is unavailable.
@@ -145,11 +147,12 @@ _EXPECTED_STEP_NAMES = (
     "extract_interfaces",
     "extract_foundation",
     "build_architecture_graph",
+    "build_dependency_graph",
 )
 
 
 async def _run_analysis(source_repo: Path, tmp_path: Path, tag: str) -> PipelineResult:
-    """Run the real, unmodified 15-step composition and return its `PipelineResult`.
+    """Run the real, unmodified 16-step composition and return its `PipelineResult`.
 
     Each `tag` gets its own storage and workspace roots, so repeated runs are fully independent.
     """
@@ -189,14 +192,21 @@ def _edge_triples(graph: DependencyGraph) -> set[tuple[str, str, int]]:
 
 
 @pytest.mark.asyncio
-async def test_composition_is_unchanged_and_exposes_real_import_results(tmp_path: Path) -> None:
-    """The composition keeps its 15 steps (no dependency-graph step) and yields real results."""
+async def test_composition_ends_with_the_dependency_graph_step_and_exposes_real_import_results(
+    tmp_path: Path,
+) -> None:
+    """The composition has 16 steps, ending in `build_dependency_graph`, and yields real results;
+    the `dependency_graph` it writes is exactly the builder's output for its own `import_results`.
+    """
     _skip_without_git()
     source_repo = _make_source_repository(tmp_path)
     result = await _run_analysis(source_repo, tmp_path, "a")
 
-    assert len(result.step_names()) == 15
-    assert not any("dependency" in name for name in result.step_names())
+    assert len(result.step_names()) == 16
+    assert result.step_names()[-1] == "build_dependency_graph"
+    assert [name for name in result.step_names() if "dependency" in name] == [
+        "build_dependency_graph"
+    ]
 
     import_results = result.context.require("import_results")
     successful_parse_results = result.context.require("successful_parse_results")
@@ -219,6 +229,10 @@ async def test_composition_is_unchanged_and_exposes_real_import_results(tmp_path
             "web/util.ts",
         )
     )
+
+    dependency_graph = result.context.require("dependency_graph")
+    assert isinstance(dependency_graph, DependencyGraph)
+    assert dependency_graph == StructuralDependencyGraphBuilder().build(import_results)
 
 
 @pytest.mark.asyncio

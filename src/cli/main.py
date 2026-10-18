@@ -9,7 +9,7 @@ this package's own `__init__.py` for the fuller architectural picture.
 
 `--analyze` is the one addition beyond the pre-existing `--config`/`--help`/`--version` surface.
 When given, `_run` passes `bootstrap.analysis_steps.build_analysis_steps(config)` straight through
-as `bootstrap.bootstrap`'s own, already-existing `extra_steps` parameter, appending the eleven-step
+as `bootstrap.bootstrap`'s own, already-existing `extra_steps` parameter, appending the thirteen-step
 real-repository analysis composition after the default three-step flow. `build_analysis_steps` is
 constructed only inside that one branch; when `--analyze` is absent, `_run` calls `bootstrap(config)`
 exactly as it always has, with no `extra_steps` -- the default flow's behavior is unchanged in

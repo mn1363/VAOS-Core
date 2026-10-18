@@ -26,12 +26,14 @@ from src.bootstrap.errors import BootstrapError
 from src.core.config import AppConfig
 from src.domain.entities import RepositoryProvider, SourceLanguage, SourceRepository
 from src.graph.architecture.structural import StructuralArchitectureGraphBuilder
+from src.graph.dependency.structural import StructuralDependencyGraphBuilder
 from src.parsers.base import FileMetadata, ParseResult, compute_content_hash
 from src.parsers.cpp.parser import CppParser
 from src.parsers.go.parser import GoParser
 from src.parsers.python.parser import PythonParser
 from src.parsers.rust.parser import RustParser
 from src.parsers.typescript.parser import TypeScriptParser
+from src.pipeline.context import PipelineContext
 from src.pipeline.steps import CallableStep, MapStep
 from src.repository.base import RepositoryClient, WorkspaceManager
 
@@ -298,20 +300,22 @@ _EXPECTED_STEP_NAMES = [
     "extract_interfaces",
     "extract_foundation",
     "build_architecture_graph",
+    "build_dependency_graph",
 ]
 
 _PREVIOUS_ELEVEN_STEP_NAMES = _EXPECTED_STEP_NAMES[:11]
+_PREVIOUS_TWELVE_STEP_NAMES = _EXPECTED_STEP_NAMES[:12]
 
 
 def test_build_analysis_steps_exact_names(tmp_path: Path) -> None:
-    """The twelve returned steps carry exactly these names -- no more, no fewer, none renamed."""
+    """The thirteen returned steps carry exactly these names -- no more, no fewer, none renamed."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
     assert sorted(step.name for step in steps) == sorted(_EXPECTED_STEP_NAMES)
 
 
 def test_build_analysis_steps_exact_order(tmp_path: Path) -> None:
-    """The twelve returned steps appear in this exact, fixed order."""
+    """The thirteen returned steps appear in this exact, fixed order."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
     assert [step.name for step in steps] == _EXPECTED_STEP_NAMES
@@ -335,6 +339,43 @@ def test_build_analysis_steps_exact_is_async(tmp_path: Path) -> None:
         "extract_interfaces": False,
         "extract_foundation": False,
         "build_architecture_graph": False,
+        "build_dependency_graph": False,
+    }
+
+
+def test_build_analysis_steps_exact_input_and_output_keys(tmp_path: Path) -> None:
+    """Every step reads and writes exactly the context keys it always did -- and the one new
+    step, `build_dependency_graph`, reads `import_results` and writes `dependency_graph`."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    steps = build_analysis_steps(config)
+
+    def _input_keys(step: object) -> tuple[str, ...]:
+        if isinstance(step, CallableStep):
+            return step._input_keys  # type: ignore[attr-defined, no-any-return]
+        assert isinstance(step, MapStep)
+        return (step._input_key,)  # type: ignore[attr-defined]
+
+    keys_by_name = {
+        step.name: (
+            _input_keys(step),
+            step._output_key,  # type: ignore[attr-defined]
+        )
+        for step in steps
+    }
+    assert keys_by_name == {
+        "require_single_repository": (("repositories",), "repositories"),
+        "clone_repositories": (("repositories",), "workspaces"),
+        "enumerate_files": (("workspaces",), "files_to_parse"),
+        "parse_files": (("files_to_parse",), "parse_results"),
+        "select_successful_parse_results": (("parse_results",), "successful_parse_results"),
+        "extract_imports": (("successful_parse_results",), "import_results"),
+        "extract_ast": (("successful_parse_results",), "ast_results"),
+        "extract_symbols": (("successful_parse_results",), "symbol_results"),
+        "extract_architecture": (("successful_parse_results",), "architecture_results"),
+        "extract_interfaces": (("successful_parse_results",), "interface_results"),
+        "extract_foundation": (("successful_parse_results",), "foundation_results"),
+        "build_architecture_graph": (("architecture_results",), "architecture_graph"),
+        "build_dependency_graph": (("import_results",), "dependency_graph"),
     }
 
 
@@ -355,11 +396,11 @@ def test_build_analysis_steps_extractor_output_keys(tmp_path: Path) -> None:
     assert output_key_by_name["extract_foundation"] == "foundation_results"
 
 
-def test_build_analysis_steps_returns_exactly_twelve(tmp_path: Path) -> None:
-    """`build_analysis_steps` returns exactly twelve `Step`s -- no more, no fewer."""
+def test_build_analysis_steps_returns_exactly_thirteen(tmp_path: Path) -> None:
+    """`build_analysis_steps` returns exactly thirteen `Step`s -- no more, no fewer."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
-    assert len(steps) == 12
+    assert len(steps) == 13
 
 
 def test_build_analysis_steps_previous_eleven_keep_names_and_order(tmp_path: Path) -> None:
@@ -382,19 +423,47 @@ def test_build_analysis_steps_previous_eleven_keep_names_and_order(tmp_path: Pat
     ]
 
 
-def test_build_architecture_graph_is_the_last_step(tmp_path: Path) -> None:
-    """`build_architecture_graph` is the final step returned."""
+def test_build_analysis_steps_previous_twelve_keep_names_and_order(tmp_path: Path) -> None:
+    """The first twelve steps -- everything that existed before `build_dependency_graph` was
+    appended -- retain their exact pre-existing names and order; none is renamed or reordered."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
-    assert steps[-1].name == "build_architecture_graph"
+    assert [step.name for step in steps[:12]] == _PREVIOUS_TWELVE_STEP_NAMES
+    assert _PREVIOUS_TWELVE_STEP_NAMES == [
+        "require_single_repository",
+        "clone_repositories",
+        "enumerate_files",
+        "parse_files",
+        "select_successful_parse_results",
+        "extract_imports",
+        "extract_ast",
+        "extract_symbols",
+        "extract_architecture",
+        "extract_interfaces",
+        "extract_foundation",
+        "build_architecture_graph",
+    ]
+
+
+def test_build_architecture_graph_keeps_its_position_and_is_no_longer_last(
+    tmp_path: Path,
+) -> None:
+    """`build_architecture_graph` is still the twelfth step, immediately after
+    `extract_foundation`, and now has exactly one successor."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    steps = build_analysis_steps(config)
+    assert steps[11].name == "build_architecture_graph"
+    assert steps[10].name == "extract_foundation"
     assert [step.name for step in steps].count("build_architecture_graph") == 1
 
 
 def test_build_architecture_graph_step_contract(tmp_path: Path) -> None:
-    """The graph step is a synchronous `CallableStep` reading `architecture_results` and
-    writing `architecture_graph`, bound to `StructuralArchitectureGraphBuilder().build`."""
+    """The architecture graph step is a synchronous `CallableStep` reading
+    `architecture_results` and writing `architecture_graph`, bound to
+    `StructuralArchitectureGraphBuilder().build` -- unchanged by the dependency graph step."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
-    step = build_analysis_steps(config)[-1]
+    step = build_analysis_steps(config)[11]
+    assert step.name == "build_architecture_graph"
     assert isinstance(step, CallableStep)
     assert step._input_keys == ("architecture_results",)  # type: ignore[attr-defined]
     assert step._output_key == "architecture_graph"  # type: ignore[attr-defined]
@@ -402,3 +471,52 @@ def test_build_architecture_graph_step_contract(tmp_path: Path) -> None:
     bound = step._func  # type: ignore[attr-defined]
     assert isinstance(bound.__self__, StructuralArchitectureGraphBuilder)
     assert bound.__func__ is StructuralArchitectureGraphBuilder.build
+
+
+def test_build_dependency_graph_is_the_last_step(tmp_path: Path) -> None:
+    """`build_dependency_graph` is the final step returned, and appears exactly once."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    steps = build_analysis_steps(config)
+    assert steps[-1].name == "build_dependency_graph"
+    assert [step.name for step in steps].count("build_dependency_graph") == 1
+
+
+def test_build_dependency_graph_is_appended_directly_after_build_architecture_graph(
+    tmp_path: Path,
+) -> None:
+    """`build_dependency_graph` immediately follows `build_architecture_graph`."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    names = [step.name for step in build_analysis_steps(config)]
+    assert names.index("build_dependency_graph") == names.index("build_architecture_graph") + 1
+
+
+def test_build_dependency_graph_step_contract(tmp_path: Path) -> None:
+    """The dependency graph step is a synchronous `CallableStep` (not a `MapStep`) reading
+    `import_results` and writing `dependency_graph`, bound to
+    `StructuralDependencyGraphBuilder().build`."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    step = build_analysis_steps(config)[-1]
+    assert type(step) is CallableStep
+    assert not isinstance(step, MapStep)
+    assert step.name == "build_dependency_graph"
+    assert step._input_keys == ("import_results",)  # type: ignore[attr-defined]
+    assert step._output_key == "dependency_graph"  # type: ignore[attr-defined]
+    assert step._is_async is False  # type: ignore[attr-defined]
+    bound = step._func  # type: ignore[attr-defined]
+    assert isinstance(bound.__self__, StructuralDependencyGraphBuilder)
+    assert bound.__func__ is StructuralDependencyGraphBuilder.build
+
+
+@pytest.mark.asyncio
+async def test_build_dependency_graph_step_writes_the_builders_graph(tmp_path: Path) -> None:
+    """Executing the step reads `import_results` and writes the builder's own result under
+    `dependency_graph`, leaving `import_results` itself in place."""
+    config = _config({"repository": {"workspace_root": str(tmp_path)}})
+    step = build_analysis_steps(config)[-1]
+    context = PipelineContext()
+    context.set("import_results", ())
+
+    returned = await step.execute(context)
+
+    assert returned.require("dependency_graph") == StructuralDependencyGraphBuilder().build(())
+    assert returned.require("import_results") == ()

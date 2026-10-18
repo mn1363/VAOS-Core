@@ -4,8 +4,9 @@ Proves that the concrete builder consumes the real, structural `architecture_res
 the real-repository analysis composition (`bootstrap(config,
 extra_steps=build_analysis_steps(config))`) and assembles them into a valid,
 deterministic `ArchitectureGraph`. The builder is also invoked directly on the context's own
-`architecture_results`, and proves that the composition's own final `build_architecture_graph`
-step (the 15th step) writes an equal `architecture_graph` into the context.
+`architecture_results`, and proves that the composition's own `build_architecture_graph` step (the
+15th step -- no longer the final one, now that `build_dependency_graph` is the 16th) writes an
+equal `architecture_graph` into the context.
 
 Like every other integration test in this directory, this clones a real, local (no-network) git
 repository, so it needs the real `git` executable and is skipped, not failed, if one is
@@ -127,11 +128,12 @@ _EXPECTED_STEP_NAMES = (
     "extract_interfaces",
     "extract_foundation",
     "build_architecture_graph",
+    "build_dependency_graph",
 )
 
 
 async def _run_analysis(source_repo: Path, tmp_path: Path, tag: str) -> PipelineResult:
-    """Run the real 15-step composition and return its `PipelineResult`.
+    """Run the real 16-step composition and return its `PipelineResult`.
 
     Each `tag` gets its own storage and workspace roots, so repeated runs are fully independent.
     """
@@ -146,7 +148,7 @@ async def _run_analysis(source_repo: Path, tmp_path: Path, tag: str) -> Pipeline
         }
     )
     result = await bootstrap(config, extra_steps=build_analysis_steps(config))
-    assert len(result.step_names()) == 15
+    assert len(result.step_names()) == 16
     assert result.step_names() == _EXPECTED_STEP_NAMES
     return result
 
@@ -154,7 +156,7 @@ async def _run_analysis(source_repo: Path, tmp_path: Path, tag: str) -> Pipeline
 async def _real_architecture_results(
     source_repo: Path, tmp_path: Path, tag: str
 ) -> tuple[ArchitectureExtractionResult, ...]:
-    """Run the real 15-step composition and return its real `architecture_results`."""
+    """Run the real 16-step composition and return its real `architecture_results`."""
     result = await _run_analysis(source_repo, tmp_path, tag)
     architecture_results: tuple[ArchitectureExtractionResult, ...] = result.context.require(
         "architecture_results"
@@ -188,7 +190,8 @@ async def test_composition_writes_architecture_graph_equal_to_direct_build(
     source_repo = _make_source_repository(tmp_path)
     result = await _run_analysis(source_repo, tmp_path, "a")
 
-    assert result.step_names()[-1] == "build_architecture_graph"
+    assert result.step_names()[-2] == "build_architecture_graph"
+    assert result.step_names()[-1] == "build_dependency_graph"
     architecture_results = result.context.require("architecture_results")
     architecture_graph = result.context.require("architecture_graph")
 
