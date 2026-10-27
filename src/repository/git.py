@@ -115,9 +115,19 @@ class GitRepositoryClient(RepositoryClient):
         Raises:
             GitCommandError: If the default branch cannot be resolved.
         """
-        stdout = await self._run_git(
-            ["symbolic-ref", "refs/remotes/origin/HEAD"], cwd=workspace_path
-        )
+        try:
+            stdout = await self._run_git(
+                ["symbolic-ref", "refs/remotes/origin/HEAD"], cwd=workspace_path
+            )
+        except GitCommandError:
+            # Some clones (including local file:// clones) do not have
+            # refs/remotes/origin/HEAD. Clone checks out the requested default
+            # branch, so use the current branch when the remote HEAD is absent.
+            stdout = await self._run_git(["branch", "--show-current"], cwd=workspace_path)
+            branch = stdout.strip()
+            if branch:
+                return branch
+            raise
         # Output looks like "refs/remotes/origin/main"; the branch name is
         # everything after the final "/".
         return stdout.strip().rsplit("/", 1)[-1]

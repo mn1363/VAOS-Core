@@ -205,3 +205,77 @@ def test_parse_reports_file_metadata() -> None:
     assert result.metadata.language is SourceLanguage.TYPESCRIPT
     assert result.metadata.line_count == 1
     assert len(result.metadata.content_hash) == 64
+
+def test_parse_excludes_declarations_nested_in_executable_blocks() -> None:
+    """Nested functions, values and local types must not leak into top-level results."""
+    content = """\
+function outer() {
+    function nested() {}
+    const localArrow = (value: number) => value;
+    const localValue = 1;
+    class LocalClass {}
+    interface LocalShape {}
+    type LocalAlias = string;
+    enum LocalEnum { Value }
+    if (true) {
+        function callbackNested() {}
+        const blockValue = 2;
+    }
+}
+function visible() {}
+const topArrow = (value: number) => value;
+const topValue = 3;
+"""
+    result = TypeScriptParser().parse(relative_path="a.ts", content=content)
+
+    assert [function.name for function in result.functions] == ["outer", "visible", "topArrow"]
+    assert [cls.name for cls in result.classes] == []
+    symbol_pairs = {(symbol.name, symbol.kind) for symbol in result.symbols}
+    assert ("topValue", SymbolKind.CONSTANT) in symbol_pairs
+    assert not any(
+        name in {"localValue", "blockValue", "LocalClass", "LocalShape", "LocalAlias", "LocalEnum"}
+        for name, _ in symbol_pairs
+    )
+
+
+def test_parse_keeps_declarations_inside_namespace_scope() -> None:
+    """Namespace/module scopes are transparent, but their nested executable scopes are opaque."""
+    content = """\
+namespace Utils {
+    export function helper() {}
+    export const version = 1;
+    export const identity = (value: number) => value;
+    export function outer() {
+        function localHelper() {}
+        const localValue = 2;
+    }
+}
+"""
+    result = TypeScriptParser().parse(relative_path="a.ts", content=content)
+
+    assert [module.name for module in result.modules] == ["Utils"]
+    assert [function.name for function in result.functions] == ["helper", "identity", "outer"]
+    assert ("version", SymbolKind.CONSTANT) in {
+        (symbol.name, symbol.kind) for symbol in result.symbols
+    }
+    assert not any(function.name == "localHelper" for function in result.functions)
+
+
+def test_parse_keeps_same_name_top_level_class_and_function() -> None:
+    """The parser must preserve both kinds so the frozen collision policy can reject them."""
+    result = TypeScriptParser().parse(
+        relative_path="a.ts", content="class Foo {}\nfunction Foo() {}\n"
+    )
+
+    assert [cls.name for cls in result.classes] == ["Foo"]
+    assert [function.name for function in result.functions] == ["Foo"]
+
+
+def test_parse_ignores_braces_inside_string_literals_when_tracking_scope() -> None:
+    """A brace inside a string must not change whether later functions are file-scope."""
+    result = TypeScriptParser().parse(
+        relative_path="a.ts",
+        content='const marker = "}";\nfunction visible() {}\n',
+    )
+
+    assert [function.name for function in result.functions] == ["visible"]

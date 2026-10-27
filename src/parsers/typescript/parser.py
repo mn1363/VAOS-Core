@@ -6,11 +6,11 @@ of its own. `class`, unlike `interface`, is reported as a `ParsedClass`, with `b
 combining whatever the class both `extends` and `implements`, since `ParsedClass` does not
 distinguish the two relationships.
 
-This scan tracks each `class` body's span so a method found inside one is not also counted as a
-free function, but it does not compute full nesting depth for arbitrary block nesting -- a named
-`function` declared *inside another function's* body (legal in TypeScript, if unusual) is still
-reported as a free function rather than being excluded as nested. This mirrors the same
-lightweight-scan trade-off this package's other three regular-expression-based parsers make.
+The scope scan treats namespace/module blocks as transparent and other brace blocks as opaque.
+Declarations nested in function bodies, callbacks, class bodies, and other executable/type scopes
+are excluded from the flat file-scope tables. The parser remains a lightweight regular-expression
+scan rather than a full TypeScript lexer; regular-expression literals and complex template-literal
+interpolation remain scanner limitations.
 """
 
 import re
@@ -139,17 +139,26 @@ class TypeScriptParser(Parser):
             relative_path=relative_path, language=SourceLanguage.TYPESCRIPT, content=content
         )
 
-        modules = _extract_namespaces(content, scan, lines)
-        imports = _extract_imports(content, scan)
-        classes, class_spans = _extract_classes(content, scan, lines)
-        arrow_names = {
-            match["name"] for match in _ARROW_PATTERN.finditer(scan) if _is_arrow(scan, match)
+        structural_scan = _mask_string_literals(scan)
+        namespace_opens = {
+            match.end() - 1 for match in _NAMESPACE_PATTERN.finditer(structural_scan)
         }
-        functions = _extract_functions(content, scan, lines, class_spans)
-        interfaces = _extract_simple(content, scan, _INTERFACE_PATTERN)
-        type_aliases = _extract_simple(content, scan, _TYPE_ALIAS_PATTERN)
-        enums = _extract_simple(content, scan, _ENUM_PATTERN)
-        consts, lets, vars_ = _extract_const_let_var(content, scan, exclude=arrow_names)
+        opaque_depths = _compute_opaque_depths(structural_scan, namespace_opens)
+        modules = _extract_namespaces(content, scan, lines, opaque_depths)
+        imports = _extract_imports(content, scan)
+        classes, class_spans = _extract_classes(content, scan, lines, opaque_depths)
+        arrow_names = {
+            match["name"]
+            for match in _ARROW_PATTERN.finditer(scan)
+            if opaque_depths[match.start()] == 0 and _is_arrow(scan, match)
+        }
+        functions = _extract_functions(content, scan, lines, class_spans, opaque_depths)
+        interfaces = _extract_simple(content, scan, _INTERFACE_PATTERN, opaque_depths)
+        type_aliases = _extract_simple(content, scan, _TYPE_ALIAS_PATTERN, opaque_depths)
+        enums = _extract_simple(content, scan, _ENUM_PATTERN, opaque_depths)
+        consts, lets, vars_ = _extract_const_let_var(
+            content, scan, exclude=arrow_names, opaque_depths=opaque_depths
+        )
 
         symbols = _build_symbols(
             modules, classes, functions, interfaces, type_aliases, enums, consts, lets, vars_
@@ -181,22 +190,75 @@ class TypeScriptParser(Parser):
         )
 
 
-def _extract_namespaces(content: str, scan: str, lines: list[str]) -> tuple[ParsedModule, ...]:
-    """Collect every `namespace`/`module` block declaration.
+def _mask_string_literals(scan: str) -> str:
+    """Blank quoted string and template literals while preserving character offsets and newlines.
 
-    Args:
-        content: The original, unmodified file content.
-        scan: `content` with comments blanked out.
-        lines: `content` split into lines (accepted for signature consistency with other
-            extraction steps; not used here).
+    The mask is used only for brace-depth analysis. Declaration matching continues to use the
+    comment-stripped source, preserving the parser's existing matching behavior.
+    """
+    masked = list(scan)
+    index = 0
+    while index < len(scan):
+        quote = scan[index]
+        if quote not in ("'", '"', "`"):
+            index += 1
+            continue
 
-    Returns:
-        Every declared namespace, in source order.
+        start = index
+        index += 1
+        while index < len(scan):
+            if scan[index] == "\\":
+                index += 2
+                continue
+            if scan[index] == quote:
+                index += 1
+                break
+            index += 1
+
+        for position in range(start, min(index, len(scan))):
+            if masked[position] not in ("\n", "\r"):
+                masked[position] = "\x00"
+
+    return "".join(masked)
+
+
+def _compute_opaque_depths(scan: str, namespace_opens: set[int]) -> list[int]:
+    """Compute opaque brace depth at every source position.
+
+    Namespace/module braces are transparent, so declarations within them remain file-scope
+    declarations for this parser. Other braces, including function bodies, class bodies, arrow
+    bodies, callbacks, control-flow blocks and object literals, are opaque. `scan` must have
+    quoted literals masked first; offsets remain identical to the original comment-stripped
+    source.
+    """
+    depths = [0] * (len(scan) + 1)
+    stack: list[bool] = []
+    for index, character in enumerate(scan):
+        if character == "\x00":
+            depths[index] = -1
+            continue
+        depths[index] = sum(stack)
+        if character == "{":
+            stack.append(index not in namespace_opens)
+        elif character == "}" and stack:
+            stack.pop()
+    depths[len(scan)] = sum(stack)
+    return depths
+
+
+def _extract_namespaces(
+    content: str, scan: str, lines: list[str], opaque_depths: list[int]
+) -> tuple[ParsedModule, ...]:
+    """Collect namespace/module blocks outside opaque executable/type scopes.
+
+    Namespace declarations can be nested in another namespace, but a match inside a function,
+    class or other opaque block is not emitted as a file-scope module.
     """
     del lines
     return tuple(
         ParsedModule(name=match["name"], line_number=line_number_at(content, match.start()))
         for match in _NAMESPACE_PATTERN.finditer(scan)
+        if opaque_depths[match.start()] == 0
     )
 
 
@@ -271,7 +333,7 @@ def _extract_imports(content: str, scan: str) -> tuple[ParsedImport, ...]:
 
 
 def _extract_classes(
-    content: str, scan: str, lines: list[str]
+    content: str, scan: str, lines: list[str], opaque_depths: list[int]
 ) -> tuple[tuple[ParsedClass, ...], tuple[tuple[int, int], ...]]:
     """Collect every `class` declaration and its methods.
 
@@ -288,6 +350,8 @@ def _extract_classes(
     spans: list[tuple[int, int]] = []
 
     for match in _CLASS_PATTERN.finditer(scan):
+        if opaque_depths[match.start()] != 0:
+            continue
         open_index = match.end() - 1
         close_index = find_matching_brace(scan, open_index)
         spans.append((open_index + 1, close_index))
@@ -383,6 +447,7 @@ def _extract_functions(
     scan: str,
     lines: list[str],
     class_spans: tuple[tuple[int, int], ...],
+    opaque_depths: list[int],
 ) -> tuple[ParsedFunction, ...]:
     """Collect every top-level `function` declaration and `const`/`let` arrow function.
 
@@ -398,7 +463,7 @@ def _extract_functions(
     functions: list[ParsedFunction] = []
 
     for match in _FUNCTION_PATTERN.finditer(scan):
-        if _inside_any(match.start(), class_spans):
+        if opaque_depths[match.start()] != 0 or _inside_any(match.start(), class_spans):
             continue
         params_open = scan.find("(", match.end())
         params_close = find_matching_paren(scan, params_open)
@@ -417,7 +482,11 @@ def _extract_functions(
         )
 
     for match in _ARROW_PATTERN.finditer(scan):
-        if _inside_any(match.start(), class_spans) or not _is_arrow(scan, match):
+        if (
+            opaque_depths[match.start()] != 0
+            or _inside_any(match.start(), class_spans)
+            or not _is_arrow(scan, match)
+        ):
             continue
         params_open = match.end() - 1
         params_close = find_matching_paren(scan, params_open)
@@ -435,7 +504,7 @@ def _extract_functions(
             )
         )
 
-    return tuple(functions)
+    return tuple(sorted(functions, key=lambda function: function.line_number))
 
 
 def _is_arrow(scan: str, match: re.Match[str]) -> bool:
@@ -475,7 +544,9 @@ def _inside_any(index: int, spans: tuple[tuple[int, int], ...]) -> bool:
     return any(start <= index < end for start, end in spans)
 
 
-def _extract_simple(content: str, scan: str, pattern: re.Pattern[str]) -> dict[str, int]:
+def _extract_simple(
+    content: str, scan: str, pattern: re.Pattern[str], opaque_depths: list[int]
+) -> dict[str, int]:
     """Collect every match of a single-capture-group declaration pattern.
 
     Shared by the `interface`, `type`, and `enum` extraction steps.
@@ -489,12 +560,14 @@ def _extract_simple(content: str, scan: str, pattern: re.Pattern[str]) -> dict[s
         A mapping of declared name to 1-indexed declaration line, in source order.
     """
     return {
-        match["name"]: line_number_at(content, match.start()) for match in pattern.finditer(scan)
+        match["name"]: line_number_at(content, match.start())
+        for match in pattern.finditer(scan)
+        if opaque_depths[match.start()] == 0
     }
 
 
 def _extract_const_let_var(
-    content: str, scan: str, *, exclude: set[str]
+    content: str, scan: str, *, exclude: set[str], opaque_depths: list[int]
 ) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
     """Collect every top-level `const`/`let`/`var` declaration's name and line number.
 
@@ -511,6 +584,8 @@ def _extract_const_let_var(
     vars_: dict[str, int] = {}
     targets = {"const": consts, "let": lets, "var": vars_}
     for match in _CONST_LET_VAR_NAME_PATTERN.finditer(scan):
+        if opaque_depths[match.start()] != 0:
+            continue
         if match["name"] in exclude:
             continue
         targets[match["keyword"]][match["name"]] = line_number_at(content, match.start())

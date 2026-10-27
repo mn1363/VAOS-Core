@@ -70,7 +70,7 @@ def _enumerate_files(workspaces: tuple[Path, ...]) -> tuple[tuple[str, str], ...
                     content = absolute.read_text(encoding="utf-8")
                 except (UnicodeDecodeError, OSError):
                     continue
-                files.append((str(absolute.relative_to(workspace)), content))
+                files.append((absolute.relative_to(workspace).as_posix(), content))
     return tuple(files)
 
 

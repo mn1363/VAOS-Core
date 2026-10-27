@@ -1,9 +1,12 @@
 """`Parser` implementation for C++ source files.
 
-Only in-class-body member declarations are collected as a class's methods; an out-of-class
-definition (`ReturnType ClassName::method(...) { ... }`) is not matched back to its class and so
-does not appear at all, a deliberate scope limitation rather than an attempt at full name
-resolution. "Exported" here means the C++20 `export` keyword prefixing a declaration; ordinary
+Only in-class-body member declarations are collected as a class's methods. The free-function
+scan rejects out-of-class definitions when their owner is identifiable as a class or constructor.
+A qualified free-function definition is retained only when its qualifier segments are evidenced as
+namespaces by declarations in the same file. The parser does not resolve included headers; as a
+result, an out-of-class member is not misreported as a free function when its class is header-only,
+but a namespace-qualified free function whose namespace is declared only in another file may be
+omitted. "Exported" here means the C++20 `export` keyword prefixing a declaration; ordinary
 (pre-modules) C++ has no such concept, so `exports` is typically empty, matching this package's
 general "where applicable" framing for the concept.
 """
@@ -110,7 +113,7 @@ class CppParser(Parser):
         modules = _extract_namespaces(content, scan)
         imports = _extract_imports(content, scan)
         classes, class_spans = _extract_classes(content, scan, lines)
-        functions = _extract_functions(content, scan, lines, class_spans)
+        functions = _extract_functions(content, scan, lines, class_spans, classes, modules)
         enums = _extract_simple(content, scan, _ENUM_PATTERN)
         type_aliases = _extract_type_aliases(content, scan)
 
@@ -287,17 +290,139 @@ def _clean_return_type(prefix: str) -> str | None:
     return " ".join(words) if words else None
 
 
+def _compute_parenthetical_depths(scan: str) -> list[int]:
+    """Return parenthesis nesting depth at every position, ignoring quoted literals.
+
+    Function-like text inside a parameter list or call expression is not a new declaration. The
+    source is already comment-stripped; simple quoted strings and character literals are skipped
+    so their parentheses do not affect nesting depth.
+    """
+    depths = [0] * (len(scan) + 1)
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index, character in enumerate(scan):
+        if quote is not None:
+            depths[index] = -1
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in ("'", '\"'):
+            depths[index] = -1
+            quote = character
+            continue
+        depths[index] = depth
+        if character == "(":
+            depth += 1
+        elif character == ")" and depth:
+            depth -= 1
+    depths[len(scan)] = depth
+    return depths
+
+
+def _preprocessor_logical_lines(scan: str) -> set[int]:
+    """Return physical line numbers belonging to preprocessor logical lines.
+
+    A trailing backslash joins the next physical line to the same directive. These lines are not
+    C++ declarations and must not be considered by the free-function pattern.
+    """
+    lines: set[int] = set()
+    in_directive = False
+    for line_number, line in enumerate(scan.splitlines(), start=1):
+        if not in_directive and re.match(r"^[ \t]*#", line):
+            in_directive = True
+        if in_directive:
+            lines.add(line_number)
+            in_directive = line.rstrip().endswith("\\")
+    return lines
+
+
+def _looks_like_expression_prefix(prefix: str) -> bool:
+    """Reject common expression/control prefixes and call-initialized declarations."""
+    stripped = prefix.lstrip()
+    if re.match(
+        r"^(?:return|throw|co_return|co_yield|goto|if|for|while|switch|catch|case|"
+        r"sizeof|alignof|decltype|typeid|static_assert|noexcept|static_cast|dynamic_cast|"
+        r"reinterpret_cast|const_cast|defined|__attribute__)\b",
+        stripped,
+    ):
+        return True
+    return "=" in prefix and "operator" not in prefix
+
+
+def _should_exclude_qualified_function(
+    prefix: str,
+    name: str,
+    class_names: set[str],
+    namespace_names: set[str],
+) -> bool:
+    """Recognize qualified member definitions without dropping known namespace functions.
+
+    The lightweight parser cannot resolve declarations from included headers. It rejects owners
+    known to be classes in this file and constructors whose qualified owner repeats the function
+    name. If the full qualifier cannot be supported as a namespace path using names declared in
+    this file, it is conservatively excluded from free functions. This avoids classifying an
+    external header's member definition as a free function, at the cost of omitting some free
+    functions qualified by namespaces declared only in other files.
+    """
+    match = re.search(r"((?:[A-Za-z_]\w*(?:<[^;{}]*?>)?::)+)\s*$", prefix)
+    if match is None:
+        return False
+
+    parts = tuple(
+        part.split("<", 1)[0] for part in match.group(1).split("::") if part
+    )
+    namespace_prefix_lengths = [
+        len(namespace_parts)
+        for namespace in namespace_names
+        if (namespace_parts := tuple(namespace.split("::")))
+        and len(namespace_parts) <= len(parts)
+        and parts[: len(namespace_parts)] == namespace_parts
+    ]
+    namespace_prefix_length = max(namespace_prefix_lengths, default=0)
+    remaining = parts[namespace_prefix_length:]
+
+    if not remaining:
+        return False
+    if any(part in class_names for part in remaining):
+        return True
+    if remaining[-1] == name:
+        return True
+    if any(part in class_names for part in parts):
+        return True
+
+    # This parser works per file and cannot inspect class declarations from included headers.
+    # A remaining unknown qualifier is therefore not sufficient evidence that the candidate is a
+    # free function. Prefer omitting it unless every qualifier segment is evidenced as a namespace
+    # by declarations in this file. This avoids emitting HeaderOnlyClass::method as a free
+    # function, while preserving known namespace-qualified definitions such as outer::inner::f.
+    namespace_components = {
+        component for namespace in namespace_names for component in namespace.split("::")
+    }
+    return not all(part in namespace_components for part in parts)
+
+
 def _extract_functions(
-    content: str, scan: str, lines: list[str], class_spans: tuple[tuple[int, int], ...]
+    content: str,
+    scan: str,
+    lines: list[str],
+    class_spans: tuple[tuple[int, int], ...],
+    classes: tuple[ParsedClass, ...],
+    modules: tuple[ParsedModule, ...],
 ) -> tuple[ParsedFunction, ...]:
     """Collect every namespace- or global-scope function declaration.
 
-    A candidate is accepted only when it sits at "opaque" brace depth 0: not nested inside any
-    class/struct body (excluded via `class_spans`), function body, or control-flow block
-    (`if`/`for`/`while`/`switch`/`catch`) -- `namespace` blocks are the one construct treated as
-    transparent, since a free function declared inside one is still a free function. Without
-    this check, a plain call statement like `return computeTotal(a, b);` inside some other
-    function's body would otherwise look identical to a new top-level function declaration.
+    A candidate is accepted only at opaque brace depth 0, outside parenthesized regions, and
+    outside preprocessor logical lines. Namespace blocks are transparent; class bodies, function
+    bodies and control-flow blocks are opaque. Expression/call-initialized declarations,
+    member-initializer fragments, out-of-class members, and qualified names not evidenced as
+    namespace paths by declarations in this file are excluded. Because the parser does not resolve
+    included headers, some qualified free functions whose namespaces are only declared elsewhere
+    are intentionally omitted rather than guessed to be free functions.
 
     Args:
         content: The original, unmodified file content.
@@ -310,15 +435,26 @@ def _extract_functions(
     """
     namespace_opens = {match.end() - 1 for match in _NAMESPACE_PATTERN.finditer(scan)}
     opaque_depths = _compute_opaque_depths(scan, namespace_opens)
+    class_names = {cls.name for cls in classes}
+    namespace_names = {module.name for module in modules}
+    parenthetical_depths = _compute_parenthetical_depths(scan)
+    preprocessor_lines = _preprocessor_logical_lines(scan)
 
     functions: list[ParsedFunction] = []
     for match in _METHOD_PATTERN.finditer(scan):
         if any(start <= match.start() < end for start, end in class_spans):
             continue
-        if opaque_depths[match.start()] != 0:
+        if opaque_depths[match.start()] != 0 or parenthetical_depths[match.start()] != 0:
+            continue
+        line = line_number_at(content, match.start())
+        if line in preprocessor_lines:
             continue
         prefix = match["prefix"].strip()
-        if not prefix:
+        if not prefix or prefix.startswith((":", ",")):
+            continue
+        if _looks_like_expression_prefix(prefix):
+            continue
+        if _should_exclude_qualified_function(prefix, match["name"], class_names, namespace_names):
             continue
         params_open = match.end() - 1
         params_close = find_matching_paren(scan, params_open)

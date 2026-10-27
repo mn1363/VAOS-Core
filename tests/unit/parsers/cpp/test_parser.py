@@ -126,6 +126,14 @@ def test_parse_does_not_mistake_a_constructor_call_statement_for_a_free_function
     assert [function.name for function in result.functions] == ["main"]
 
 
+def test_parse_does_not_emit_parameter_type_fragments_as_free_functions() -> None:
+    """Function-like text inside nested parameter types is not a declaration."""
+    content = "void wrapper(std::function<void(void)> callback) { }\n"
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert [function.name for function in result.functions] == ["wrapper"]
+
+
 def test_parse_does_not_mistake_a_return_call_statement_for_a_free_function() -> None:
     """`parse` should not treat `return computeTotal(a, b);` as a new function declaration."""
     content = "int wrapper() {\n    return computeTotal(1, 2);\n}\n"
@@ -175,3 +183,128 @@ def test_parse_reports_file_metadata() -> None:
     assert result.metadata.language is SourceLanguage.CPP
     assert result.metadata.line_count == 1
     assert len(result.metadata.content_hash) == 64
+
+
+def test_parse_does_not_emit_out_of_class_member_definitions() -> None:
+    """Out-of-class member definitions must not become free functions."""
+    content = """\
+namespace app {}
+class Widget {
+public:
+    Widget(int value);
+    int get() const;
+};
+Widget::Widget(int value) {}
+int Widget::get() const { return 0; }
+int app::helper() { return 1; }
+"""
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert [function.name for function in result.functions] == ["helper"]
+
+
+def test_parse_omits_unknown_qualified_definition_but_keeps_known_namespace_function() -> None:
+    """A qualifier not proved to be a namespace must not be assumed to denote a free function."""
+    content = """\\
+namespace detail {}
+int detail::helper() { return 0; }
+int HeaderOnly::method() { return 1; }
+"""
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert [function.name for function in result.functions] == ["helper"]
+
+
+def test_parse_does_not_emit_out_of_class_template_constructor() -> None:
+    """Template-qualified constructor definitions are not free functions."""
+    content = """\
+template <typename T>
+class Matcher {
+public:
+    explicit Matcher(T value);
+};
+template <typename T>
+Matcher<T>::Matcher(T value) {}
+"""
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert result.functions == ()
+
+
+def test_parse_does_not_emit_constructor_mem_initializer_fragments() -> None:
+    """Mem-initializer entries are not standalone free functions."""
+    content = """\
+class Base {};
+class Widget : public Base {
+public:
+    Widget(int value);
+    int member;
+};
+Widget::Widget(int value)
+    : Base(value),
+      member(value) {}
+"""
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert result.functions == ()
+
+
+def test_parse_does_not_emit_macro_definition_fragments_as_functions() -> None:
+    """Macro definitions and their continued lines are not free-function declarations."""
+    content = """\
+class CodeLocation {};
+#define MAKE_LOC(file, line) \\
+    ::testing::internal::CodeLocation(file, line)
+"""
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert result.functions == ()
+
+
+def test_parse_does_not_emit_call_initialized_variables_as_functions() -> None:
+    """A variable initializer with a call expression is not a function definition."""
+    content = """\
+auto buffer_size = detail::buffer_size();
+auto widget = makeWidget();
+"""
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert result.functions == ()
+
+
+def test_parse_keeps_same_name_top_level_class_and_function() -> None:
+    """A valid class/function name conflict remains visible to the frozen graph policy."""
+    result = CppParser().parse(
+        relative_path="a.cpp", content="class Foo {};\nvoid Foo() {}\n"
+    )
+
+    assert [cls.name for cls in result.classes] == ["Foo"]
+    assert [function.name for function in result.functions] == ["Foo"]
+
+
+def test_parse_keeps_namespace_qualified_free_function_in_nested_namespace() -> None:
+    """Known nested namespaces do not cause an unrelated free function to be filtered."""
+    content = """\
+namespace outer {
+namespace inner {}
+}
+int outer::inner::helper() { return 0; }
+"""
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert [function.name for function in result.functions] == ["helper"]
+
+
+def test_parse_keeps_free_function_overloads() -> None:
+    """Distinct free-function overloads remain in parser output for downstream coalescing."""
+    content = """\
+int add(int value) { return value; }
+int add(double value) { return static_cast<int>(value); }
+"""
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+
+    assert [function.name for function in result.functions] == ["add", "add"]
+    assert [function.parameters for function in result.functions] == [
+        ("int value",),
+        ("double value",),
+    ]
