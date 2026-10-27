@@ -1,5 +1,6 @@
 """Unit tests for `src.collectors.filesystem`."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,25 @@ async def test_collect_describes_an_existing_directory(tmp_path: Path) -> None:
     assert repository.name == "my-project"
     assert repository.source_uri == str(target.resolve())
     assert repository.provider is RepositoryProvider.FILESYSTEM
+    assert repository.default_branch == "main"
+
+
+@pytest.mark.asyncio
+async def test_collect_uses_the_current_branch_for_a_git_repository(tmp_path: Path) -> None:
+    """A local Git repository should carry its checked-out branch into clone metadata."""
+    target = tmp_path / "git-project"
+    target.mkdir()
+    subprocess.run(
+        ["git", "init", "--initial-branch=develop"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+    )
+
+    result = await FilesystemCollector().collect(str(target))
+
+    assert result.succeeded is True
+    assert result.repositories[0].default_branch == "develop"
 
 
 @pytest.mark.asyncio

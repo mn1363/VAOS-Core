@@ -1,10 +1,27 @@
 """`Collector` for a single local directory treated directly as one repository."""
 
+import subprocess
 from pathlib import Path
 
 from src.domain.entities import RepositoryProvider, SourceRepository
 
 from .base import CollectionResult, Collector, require_source
+
+
+def _current_branch(path: Path) -> str:
+    """Return the checked-out Git branch, or the conventional fallback for a plain folder."""
+    try:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return "main"
+    return result.stdout.strip() or "main"
 
 
 class FilesystemCollector(Collector):
@@ -47,5 +64,6 @@ class FilesystemCollector(Collector):
             name=resolved.name or str(resolved),
             source_uri=str(resolved),
             provider=RepositoryProvider.FILESYSTEM,
+            default_branch=_current_branch(resolved),
         )
         return CollectionResult.ok(source, [repository])
