@@ -338,7 +338,7 @@ def test_one_symbol_produces_one_node_and_one_declares_relation() -> None:
 
 
 def test_symbol_kinds_are_preserved_in_a_kind_attribute() -> None:
-    """Class, function, method, and constant symbols each carry their source kind."""
+    """Class, function, method, constant, and property symbols each carry their source kind."""
     graph = StructuralKnowledgeGraphBuilder().build(
         symbol_results=(
             _symbols_result(
@@ -347,6 +347,7 @@ def test_symbol_kinds_are_preserved_in_a_kind_attribute() -> None:
                 _symbol("a.py", "bar", ExtractedSymbolKind.METHOD, owner="Foo"),
                 _symbol("a.py", "run", ExtractedSymbolKind.FUNCTION),
                 _symbol("a.py", "LIMIT", ExtractedSymbolKind.CONSTANT),
+                _symbol("a.py", "size", ExtractedSymbolKind.PROPERTY, owner="Foo"),
             ),
         )
     )
@@ -360,7 +361,45 @@ def test_symbol_kinds_are_preserved_in_a_kind_attribute() -> None:
         "symbol:a.py::Foo.bar": ("kind=method",),
         "symbol:a.py::run": ("kind=function",),
         "symbol:a.py::LIMIT": ("kind=constant",),
+        "symbol:a.py::Foo.size": ("kind=property",),
     }
+
+
+def test_property_symbol_is_a_symbol_node_declared_by_its_file() -> None:
+    """An interface property is an ordinary `SYMBOL` node: its qualified identity, `kind=property`,
+    and the normal `DECLARES` relation -- no other node or relation kind appears."""
+    prop = _symbol("ports.ts", "id", ExtractedSymbolKind.PROPERTY, owner="User", line_number=2)
+    graph = StructuralKnowledgeGraphBuilder().build(
+        symbol_results=(_symbols_result("ports.ts", prop),)
+    )
+    expected = symbol_node_id(relative_path="ports.ts", name="id", owner="User")
+    assert expected == "symbol:ports.ts::User.id"
+    assert graph.nodes == (
+        _entity("ports.ts"),
+        KnowledgeNode(
+            identifier=expected,
+            kind=KnowledgeNodeKind.SYMBOL,
+            label="id",
+            relative_path="ports.ts",
+            attributes=("kind=property",),
+        ),
+    )
+    assert graph.relations == (_declares("ports.ts", expected),)
+
+
+def test_same_named_properties_of_different_interfaces_are_distinct_symbol_nodes() -> None:
+    """`Reader.id` and `Writer.id` keep separate identities, each declared by the file."""
+    reader_id = _symbol("ports.ts", "id", ExtractedSymbolKind.PROPERTY, owner="Reader")
+    writer_id = _symbol("ports.ts", "id", ExtractedSymbolKind.PROPERTY, owner="Writer")
+    graph = StructuralKnowledgeGraphBuilder().build(
+        symbol_results=(_symbols_result("ports.ts", reader_id, writer_id),)
+    )
+    symbol_ids = [n.identifier for n in graph.nodes if n.kind is KnowledgeNodeKind.SYMBOL]
+    assert symbol_ids == ["symbol:ports.ts::Reader.id", "symbol:ports.ts::Writer.id"]
+    assert [(r.source, r.target) for r in graph.relations] == [
+        ("entity:ports.ts", "symbol:ports.ts::Reader.id"),
+        ("entity:ports.ts", "symbol:ports.ts::Writer.id"),
+    ]
 
 
 def test_method_symbol_identifier_matches_the_frozen_symbol_node_id_helper() -> None:
@@ -1474,6 +1513,23 @@ def test_b2_a_class_and_a_constant_with_one_symbol_identifier_are_rejected() -> 
         "class",
         "constant",
     ]
+
+
+def test_b2_equivalent_property_declarations_coalesce_and_a_method_clash_is_rejected() -> None:
+    """Properties follow the existing symbol policy: equal keys coalesce, a kind clash rejects."""
+    first = _symbol("m.ts", "x", ExtractedSymbolKind.PROPERTY, "A", line_number=2)
+    second = _symbol("m.ts", "x", ExtractedSymbolKind.PROPERTY, "A", line_number=6)
+    graph = _build_one(symbols=(first, second), path="m.ts")
+    assert [n.identifier for n in graph.nodes if n.kind is KnowledgeNodeKind.SYMBOL] == [
+        "symbol:m.ts::A.x"
+    ]
+
+    method = _symbol("m.ts", "x", ExtractedSymbolKind.METHOD, "A", line_number=9)
+    error = _rejection_one(symbols=(first, method), path="m.ts")
+    (collision,) = _collisions(error)
+    assert collision["identifier"] == "symbol:m.ts::A.x"
+    assert collision["reason"] == "conflicting_records"
+    assert collision["differing_fields"] == ["declaration_kind"]
 
 
 def test_b3_candidates_differing_only_in_candidate_kind_are_rejected_by_the_kind_guard() -> None:

@@ -11,7 +11,7 @@ result -- none is hand-derived from the source snippet alone.
 import pytest
 from src.core.exceptions import ValidationError
 from src.domain.entities import SourceLanguage
-from src.extractors.symbols.base import ExtractedSymbolKind, SymbolExtractor
+from src.extractors.symbols.base import ExtractedSymbol, ExtractedSymbolKind, SymbolExtractor
 from src.extractors.symbols.structural import StructuralSymbolExtractor
 from src.parsers.base import ParseResult
 from src.parsers.cpp.parser import CppParser
@@ -341,3 +341,149 @@ def test_cpp_never_extracts_constants_due_to_parser_limitation() -> None:
 def test_structural_symbol_extractor_is_a_symbol_extractor() -> None:
     """`StructuralSymbolExtractor` is a genuine `SymbolExtractor`, not just structurally similar."""
     assert isinstance(StructuralSymbolExtractor(), SymbolExtractor)
+
+
+def test_typescript_interface_methods_keep_distinct_owners() -> None:
+    """Same-named methods on separate interfaces retain separate qualified identities."""
+    content = """interface Reader {
+    open(): void;
+}
+interface Writer {
+    open(): void;
+}
+"""
+    parse_result = TypeScriptParser().parse(relative_path="ports.ts", content=content)
+    result = StructuralSymbolExtractor().extract(parse_result)
+
+    methods = [symbol for symbol in result.symbols if symbol.kind == ExtractedSymbolKind.METHOD]
+    assert [(method.name, method.qualified_name) for method in methods] == [
+        ("open", "ports.ts::Reader.open"),
+        ("open", "ports.ts::Writer.open"),
+    ]
+
+
+def _property_symbols(content: str, relative_path: str = "ports.ts") -> list[ExtractedSymbol]:
+    """Parse TypeScript `content` and return only its extracted `PROPERTY` symbols."""
+    parse_result = TypeScriptParser().parse(relative_path=relative_path, content=content)
+    result = StructuralSymbolExtractor().extract(parse_result)
+    return [symbol for symbol in result.symbols if symbol.kind == ExtractedSymbolKind.PROPERTY]
+
+
+def test_property_kind_has_a_stable_string_value() -> None:
+    """The new kind serializes as `property`, which graph nodes embed as `kind=property`."""
+    assert ExtractedSymbolKind.PROPERTY.value == "property"
+
+
+def test_typescript_interface_properties_are_extracted_as_property_symbols() -> None:
+    """Each interface property becomes a `PROPERTY` symbol qualified by its interface."""
+    content = """interface User {
+    id: string;
+    name: string;
+    age?: number;
+    readonly createdAt: Date;
+    readonly tags?: string[];
+}
+"""
+    symbols = _property_symbols(content)
+
+    assert [(s.name, s.qualified_name, s.line_number) for s in symbols] == [
+        ("id", "ports.ts::User.id", 2),
+        ("name", "ports.ts::User.name", 3),
+        ("age", "ports.ts::User.age", 4),
+        ("createdAt", "ports.ts::User.createdAt", 5),
+        ("tags", "ports.ts::User.tags", 6),
+    ]
+    assert {s.relative_path for s in symbols} == {"ports.ts"}
+
+
+def test_typescript_generic_interface_properties_keep_the_interface_owner() -> None:
+    """A generic interface owns its properties by its bare name, without type parameters."""
+    content = """interface Repository<T> {
+    items: T[];
+    readonly metadata: Record<string, unknown>;
+    findById?(id: string): Promise<T>;
+}
+"""
+    parse_result = TypeScriptParser().parse(relative_path="ports.ts", content=content)
+    result = StructuralSymbolExtractor().extract(parse_result)
+
+    assert [(s.kind, s.qualified_name) for s in result.symbols] == [
+        (ExtractedSymbolKind.METHOD, "ports.ts::Repository.findById"),
+        (ExtractedSymbolKind.PROPERTY, "ports.ts::Repository.items"),
+        (ExtractedSymbolKind.PROPERTY, "ports.ts::Repository.metadata"),
+    ]
+
+
+def test_typescript_same_property_name_in_two_interfaces_stays_distinct() -> None:
+    """Same-named properties of different interfaces have different qualified identities."""
+    content = """interface Reader {
+    id: string;
+}
+interface Writer {
+    id: number;
+}
+"""
+    symbols = _property_symbols(content)
+
+    assert [(s.name, s.qualified_name) for s in symbols] == [
+        ("id", "ports.ts::Reader.id"),
+        ("id", "ports.ts::Writer.id"),
+    ]
+    assert len({s.qualified_name for s in symbols}) == 2
+
+
+def test_typescript_interface_property_and_method_symbols_are_not_confused() -> None:
+    """Properties and methods of one interface keep their own kinds and the fixed ordering."""
+    content = """class Box {
+    grow(): void {}
+}
+interface Shape {
+    label: string;
+    area(): number;
+}
+function make() {}
+const LIMIT = 1;
+"""
+    parse_result = TypeScriptParser().parse(relative_path="ports.ts", content=content)
+    result = StructuralSymbolExtractor().extract(parse_result)
+
+    assert [(s.kind, s.qualified_name) for s in result.symbols] == [
+        (ExtractedSymbolKind.CLASS, "ports.ts::Box"),
+        (ExtractedSymbolKind.METHOD, "ports.ts::Box.grow"),
+        (ExtractedSymbolKind.METHOD, "ports.ts::Shape.area"),
+        (ExtractedSymbolKind.PROPERTY, "ports.ts::Shape.label"),
+        (ExtractedSymbolKind.FUNCTION, "ports.ts::make"),
+        (ExtractedSymbolKind.CONSTANT, "ports.ts::LIMIT"),
+    ]
+
+
+def test_typescript_interface_property_symbols_are_unique_per_declaration_site() -> None:
+    """Properties of one interface with different names never share a qualified name."""
+    content = "interface P { a: string; b: string; c?: number }\n"
+    symbols = _property_symbols(content)
+
+    assert len({s.qualified_name for s in symbols}) == len(symbols) == 3
+
+
+def test_other_language_parsers_never_produce_property_symbols() -> None:
+    """Only TypeScript interfaces carry properties; the other parsers produce none."""
+    extractor = StructuralSymbolExtractor()
+    results = [
+        extractor.extract(
+            PythonParser().parse(relative_path="a.py", content="class A:\n    x = 1\n")
+        ),
+        extractor.extract(
+            RustParser().parse(relative_path="a.rs", content="struct A { x: i32 }\n")
+        ),
+        extractor.extract(
+            GoParser().parse(
+                relative_path="a.go", content="package a\ntype A struct {\n    X int\n}\n"
+            )
+        ),
+        extractor.extract(
+            CppParser().parse(relative_path="a.cpp", content="struct A { int x; };\n")
+        ),
+    ]
+
+    for result in results:
+        assert not [s for s in result.symbols if s.kind == ExtractedSymbolKind.PROPERTY]

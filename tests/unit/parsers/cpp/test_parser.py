@@ -308,3 +308,38 @@ int add(double value) { return static_cast<int>(value); }
         ("int value",),
         ("double value",),
     ]
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "constexpr int big = 1'000;",
+        "#error don't build",
+        "#define BROKEN(x (x)",
+    ],
+)
+def test_parse_preprocessor_and_digit_separators_do_not_hide_later_functions(
+    prefix: str,
+) -> None:
+    """Quotes and parentheses in non-code prefixes must not affect later declarations."""
+    content = f"{prefix}\nint first() {{ return 1; }}\nint second() {{ return 2; }}\n"
+    result = CppParser().parse(relative_path="a.cpp", content=content)
+    assert [function.name for function in result.functions] == ["first", "second"]
+
+
+def test_parse_keeps_function_with_default_template_argument() -> None:
+    """An equals sign in a template parameter is not an expression initializer."""
+    result = CppParser().parse(
+        relative_path="a.cpp",
+        content="template <typename T = int> void f(T value) {}\n",
+    )
+    assert [function.name for function in result.functions] == ["f"]
+
+
+def test_parse_unterminated_character_literal_does_not_hide_later_functions() -> None:
+    """An invalid character literal must not keep quote state across lines."""
+    result = CppParser().parse(
+        relative_path="a.cpp",
+        content="char broken = '\nint visible() { return 1; }\n",
+    )
+    assert [function.name for function in result.functions] == ["visible"]

@@ -54,7 +54,7 @@ deliberately not edited to say so; this document is where that semantics is reco
 | Kind | Identifier | Label | `relative_path` | Attributes |
 |---|---|---|---|---|
 | `ENTITY` | `entity_node_id(relative_path=path)` | the path | the path | `()` |
-| `SYMBOL` | `symbol:` + `ExtractedSymbol.qualified_name` | `symbol.name` | `symbol.relative_path` | `("kind=<kind>",)` |
+| `SYMBOL` | `symbol:` + `ExtractedSymbol.qualified_name` | `symbol.name` | `symbol.relative_path` | `("kind=<kind>",)`, where `<kind>` is `class`, `function`, `method`, `constant`, or `property` |
 | `PATTERN` | `pattern_node_id(relative_path, subject_name, name)` | `pattern.name` | `pattern.relative_path` | `("description=…", "evidence=…", …)` |
 | `INTERFACE` | `interface_node_id(relative_path, name)` | `interface.name` | `interface.relative_path` | `("origin=<origin>", "method_signature=…", …)` |
 | `CAPABILITY` | `capability_node_id(relative_path, name)` | `candidate.name` | `candidate.relative_path` | `candidate.signals`, verbatim |
@@ -65,6 +65,29 @@ verbatim (via the base module's `_node_id` namespacing helper, because the publi
 `symbol_node_id` can only rebuild a qualified name from an owner and name — which would mean
 reconstructing method ownership). A unit test checks that a method's identifier equals the frozen
 `symbol_node_id(relative_path=…, name=…, owner=…)` result.
+
+**Interface properties.** A TypeScript interface property reaches the graph through the existing
+symbol flow, with no change to the builder, the identity helpers, or the node and relation kinds.
+The symbol extractor emits it as an `ExtractedSymbol` of kind `ExtractedSymbolKind.PROPERTY` whose
+`qualified_name` is qualified by its interface (`ports.ts::User.id`), and the builder maps it like
+any other symbol:
+
+- It becomes a `SYMBOL` node, identified by `symbol:` + the preserved qualified name
+  (`symbol:ports.ts::User.id`), labeled with the property's own name (`id`), carrying the file's
+  `relative_path`, with the single attribute `kind=property`.
+- Its file's entity receives the normal `DECLARES` relation to it, exactly one per node.
+- There is no property-specific node kind and no property-specific relation kind.
+- Same-named properties of different interfaces (`Reader.id` and `Writer.id`) are different
+  identities and therefore different nodes.
+- Only the node projection above is carried. A property's type, `?` optionality, and `readonly`
+  status are not fields of `ExtractedSymbol`, so they do not reach the graph; its line number is on
+  the symbol but, as for every symbol, is not projected into the node.
+- The duplicate identity policy applies unchanged. Equivalent property records (same qualified
+  name, name, kind, and path) coalesce into one node; a property and a method with the same owner
+  and name differ in declaration kind and are rejected as a conflict.
+
+Only TypeScript produces interface properties, because only `TypeScriptParser` reports interface
+properties; see `docs/extractor_symbols_summary.md`.
 
 **Entities.** One per distinct file path, collected from: every result's `relative_path` in all
 four sequences (including successful results with no concepts); every concept's own
@@ -84,8 +107,9 @@ empty string. Package nodes are **not** deduplicated by the builder: two `Packag
 `KnowledgeNode.attributes` is a tuple of strings. Where the builder adds an encoding it is
 `"<key>=<value>"`, split on the first `"="`, in a fixed order:
 
-- `SYMBOL`: exactly one entry, `kind=class`, `kind=function`, `kind=method`, or `kind=constant`
-  (the `ExtractedSymbolKind` value).
+- `SYMBOL`: exactly one entry, `kind=class`, `kind=function`, `kind=method`, `kind=constant`, or
+  `kind=property` (the `ExtractedSymbolKind` value). `kind=property` is used for TypeScript
+  interface properties.
 - `PATTERN`: `description=<description>` first, then one `evidence=<item>` per evidence item, in
   the original order.
 - `INTERFACE`: `origin=<InterfaceOrigin value>` (`language_interface`, `trait`, or
@@ -318,9 +342,12 @@ pattern mapping is tested at unit level with constructed `PatternExtractionResul
 ## Files
 
 - `src/graph/knowledge/structural.py` — the builder.
-- `tests/unit/graph/knowledge/test_structural.py` — unit tests over constructed DTOs.
+- `tests/unit/graph/knowledge/test_structural.py` — unit tests over constructed DTOs, including
+  property symbols (`kind=property`, identity, `DECLARES`, same-named properties of different
+  interfaces, and their place in the duplicate identity policy).
 - `tests/integration/test_knowledge_graph.py` — real temporary Git repository, real parsers and
-  extractors, builder invoked directly on the composition's results with its architecture graph.
+  extractors, builder invoked directly on the composition's results with its architecture graph;
+  includes real TypeScript interface properties flowing into `SYMBOL` nodes.
 - `tests/integration/test_knowledge_graph_coalescing.py` — the duplicate identity policy over real
   parsers (Python, Go, Rust, TypeScript, C++) and, with a real temporary Git repository, the real
   composition: one accepted fixture (every duplicate coalesces) and one non-equivalent conflict

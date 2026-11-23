@@ -301,7 +301,21 @@ def _compute_parenthetical_depths(scan: str) -> list[int]:
     depth = 0
     quote: str | None = None
     escaped = False
+    preprocessor_lines = _preprocessor_logical_lines(scan)
+    line_number = 1
     for index, character in enumerate(scan):
+        if character == "\n":
+            depths[index] = -1 if line_number in preprocessor_lines else depth
+            line_number += 1
+            if quote is not None:
+                if escaped:
+                    escaped = False
+                else:
+                    quote = None
+            continue
+        if line_number in preprocessor_lines:
+            depths[index] = -1
+            continue
         if quote is not None:
             depths[index] = -1
             if escaped:
@@ -311,7 +325,7 @@ def _compute_parenthetical_depths(scan: str) -> list[int]:
             elif character == quote:
                 quote = None
             continue
-        if character in ("'", '\"'):
+        if character in ("'", '"'):
             depths[index] = -1
             quote = character
             continue
@@ -351,7 +365,8 @@ def _looks_like_expression_prefix(prefix: str) -> bool:
         stripped,
     ):
         return True
-    return "=" in prefix and "operator" not in prefix
+    declaration_prefix = re.sub(r"\btemplate\s*<[^>]*>", "", prefix)
+    return "=" in declaration_prefix and "operator" not in declaration_prefix
 
 
 def _should_exclude_qualified_function(

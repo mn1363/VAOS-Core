@@ -36,9 +36,12 @@ def test_callable_node_accepts_function_and_method_kinds(kind: ExtractedSymbolKi
     assert node.kind is kind
 
 
-@pytest.mark.parametrize("kind", [ExtractedSymbolKind.CLASS, ExtractedSymbolKind.CONSTANT])
+@pytest.mark.parametrize(
+    "kind",
+    [ExtractedSymbolKind.CLASS, ExtractedSymbolKind.CONSTANT, ExtractedSymbolKind.PROPERTY],
+)
 def test_callable_node_rejects_non_callable_kinds(kind: ExtractedSymbolKind) -> None:
-    """A `CallableNode` should reject `CLASS` and `CONSTANT` kinds."""
+    """A `CallableNode` should reject `CLASS`, `CONSTANT`, and `PROPERTY` kinds."""
     with pytest.raises(ValidationError):
         CallableNode(qualified_name="a.py::X", name="X", kind=kind, relative_path="a.py")
 
@@ -189,6 +192,7 @@ def test_is_callable_symbol_kind_true_for_function_and_method() -> None:
 
 
 def test_is_callable_symbol_kind_false_for_class_and_constant() -> None:
-    """`is_callable_symbol_kind` should be False for `CLASS` and `CONSTANT`."""
+    """`is_callable_symbol_kind` should be False for `CLASS`, `CONSTANT`, and `PROPERTY`."""
     assert is_callable_symbol_kind(ExtractedSymbolKind.CLASS) is False
     assert is_callable_symbol_kind(ExtractedSymbolKind.CONSTANT) is False
+    assert is_callable_symbol_kind(ExtractedSymbolKind.PROPERTY) is False

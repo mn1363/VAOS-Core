@@ -63,6 +63,7 @@ class SymbolKind(StrEnum):
     TYPE_ALIAS = auto()
     FUNCTION = auto()
     METHOD = auto()
+    PROPERTY = auto()
     VARIABLE = auto()
     CONSTANT = auto()
 
@@ -144,10 +145,10 @@ class ParsedFunction:
 class ParsedClass:
     """A single class-like type found in a file.
 
-    "Class-like" is intentionally broad: it covers Python/TypeScript classes, Rust and Go/C++
-    structs (paired with their `impl`/method-receiver/in-body methods), and TypeScript
-    interfaces are represented as `SymbolKind.INTERFACE` symbols instead, since an interface has
-    no method bodies of its own to collect.
+    "Class-like" is intentionally broad: it covers Python/TypeScript classes and Rust/Go/C++
+    structs (paired with their `impl`/method-receiver/in-body methods). TypeScript interfaces use
+    `ParsedInterface` entries because their method signatures have no bodies but remain useful
+    structural data.
 
     Attributes:
         name: The class's name.
@@ -166,6 +167,50 @@ class ParsedClass:
     decorators: tuple[str, ...] = ()
     docstring: str | None = None
     line_number: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedProperty:
+    """A single data property declared by a TypeScript-style interface.
+
+    Only ordinary named properties are represented. Method signatures, call and construct
+    signatures, index signatures, and getter/setter signatures are never properties; methods and
+    accessors live on `ParsedInterface.methods` instead.
+
+    Attributes:
+        name: The property's name. A quoted name is stored without its quotes (`"first-name"`
+            becomes `first-name`) and a numeric name as written (`0`).
+        type_annotation: The declared type, as written, with runs of whitespace collapsed to a
+            single space. None if the property has no type annotation (e.g. `value;`).
+        is_optional: Whether the property is declared optional with `?`.
+        is_readonly: Whether the property carries the `readonly` modifier.
+        line_number: 1-indexed line the property is declared on. 0 if unknown.
+    """
+
+    name: str
+    type_annotation: str | None = None
+    is_optional: bool = False
+    is_readonly: bool = False
+    line_number: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedInterface:
+    """A TypeScript-style interface and its declared members.
+
+    Attributes:
+        name: The interface's name.
+        methods: Method, getter, and setter signatures declared by the interface, as
+            `ParsedFunction` entries with `is_method=True`.
+        line_number: 1-indexed line the interface is declared on. 0 if unknown.
+        properties: Data properties declared by the interface, in declaration order. Declared
+            after `line_number` so existing positional construction keeps working.
+    """
+
+    name: str
+    methods: tuple[ParsedFunction, ...] = ()
+    line_number: int = 0
+    properties: tuple[ParsedProperty, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +300,7 @@ class ParseResult:
     metadata: FileMetadata | None = None
     modules: tuple[ParsedModule, ...] = ()
     classes: tuple[ParsedClass, ...] = ()
+    interfaces: tuple[ParsedInterface, ...] = ()
     functions: tuple[ParsedFunction, ...] = ()
     imports: tuple[ParsedImport, ...] = ()
     exports: tuple[ParsedExport, ...] = ()
@@ -287,6 +333,7 @@ class ParseResult:
             if (
                 self.modules
                 or self.classes
+                or self.interfaces
                 or self.functions
                 or self.imports
                 or self.exports
@@ -305,6 +352,7 @@ class ParseResult:
         metadata: FileMetadata,
         modules: Sequence[ParsedModule] = (),
         classes: Sequence[ParsedClass] = (),
+        interfaces: Sequence[ParsedInterface] = (),
         functions: Sequence[ParsedFunction] = (),
         imports: Sequence[ParsedImport] = (),
         exports: Sequence[ParsedExport] = (),
@@ -333,6 +381,7 @@ class ParseResult:
             metadata=metadata,
             modules=tuple(modules),
             classes=tuple(classes),
+            interfaces=tuple(interfaces),
             functions=tuple(functions),
             imports=tuple(imports),
             exports=tuple(exports),

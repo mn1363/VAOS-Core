@@ -9,7 +9,9 @@ from src.parsers.base import (
     ParsedExport,
     ParsedFunction,
     ParsedImport,
+    ParsedInterface,
     ParsedModule,
+    ParsedProperty,
     ParsedSymbol,
     Parser,
     ParseResult,
@@ -310,6 +312,8 @@ def test_is_top_level_of_span_false_when_nested() -> None:
         ParsedExport(name="foo"),
         ParsedFunction(name="foo"),
         ParsedClass(name="Foo"),
+        ParsedInterface(name="Foo"),
+        ParsedProperty(name="id"),
         ParsedModule(name="mod"),
         ParsedSymbol(name="foo", kind=SymbolKind.FUNCTION),
     ],
@@ -318,3 +322,68 @@ def test_parsed_construct_dtos_are_frozen(dto: object) -> None:
     """Every parsed-construct DTO should be immutable once constructed."""
     with pytest.raises(AttributeError):
         dto.line_number = 99  # type: ignore[attr-defined]
+
+
+def test_parsed_property_defaults_describe_a_required_writable_untyped_property() -> None:
+    """`ParsedProperty` should default to an untyped, required, writable property."""
+    prop = ParsedProperty(name="id")
+
+    assert prop.type_annotation is None
+    assert prop.is_optional is False
+    assert prop.is_readonly is False
+    assert prop.line_number == 0
+
+
+def test_parsed_property_carries_every_declared_field() -> None:
+    """`ParsedProperty` should store name, type, optionality, readonly status, and line."""
+    prop = ParsedProperty(
+        name="tags", type_annotation="string[]", is_optional=True, is_readonly=True, line_number=6
+    )
+
+    assert prop.name == "tags"
+    assert prop.type_annotation == "string[]"
+    assert prop.is_optional is True
+    assert prop.is_readonly is True
+    assert prop.line_number == 6
+
+
+def test_parsed_interface_properties_default_to_empty() -> None:
+    """An existing-style `ParsedInterface` construction should have no properties."""
+    interface = ParsedInterface(name="Shape", methods=(ParsedFunction(name="area"),), line_number=3)
+
+    assert interface.properties == ()
+
+
+def test_parsed_interface_positional_construction_is_unchanged() -> None:
+    """`properties` must come after the original fields so positional callers keep working."""
+    method = ParsedFunction(name="area")
+
+    interface = ParsedInterface("Shape", (method,), 3)
+
+    assert (interface.name, interface.methods, interface.line_number) == ("Shape", (method,), 3)
+    assert interface.properties == ()
+
+
+def test_parse_result_ok_carries_interface_properties() -> None:
+    """`ParseResult.ok` should carry interfaces together with their properties."""
+    prop = ParsedProperty(name="id", type_annotation="string", line_number=2)
+    interface = ParsedInterface(name="User", line_number=1, properties=(prop,))
+
+    result = ParseResult.ok(
+        relative_path="a.ts",
+        language=SourceLanguage.TYPESCRIPT,
+        metadata=_metadata(),
+        interfaces=[interface],
+    )
+
+    assert result.interfaces == (interface,)
+    assert result.interfaces[0].properties == (prop,)
+
+
+def test_strip_c_style_comments_remains_blind_to_string_literals() -> None:
+    """The shared scanner is unchanged: it still treats `//` inside a string as a comment.
+
+    Its docstring documents this as an accepted limitation. `TypeScriptParser` no longer relies on
+    it (it uses `strip_typescript_comments`), but the other parsers do, so its behavior is pinned.
+    """
+    assert strip_c_style_comments('x = "http://a"') == 'x = "http:    '

@@ -24,25 +24,27 @@ _logger = get_logger("extractors.symbols")
 class ExtractedSymbolKind(StrEnum):
     """The kind of construct a single `ExtractedSymbol` represents.
 
-    A deliberately narrow subset of `parsers.base.SymbolKind` -- the three kinds this Port's
-    contract (classes, functions, constants) is scoped to -- rather than the full construct
-    taxonomy `parsers.base.SymbolKind` covers.
+    A deliberately narrow subset of `parsers.base.SymbolKind` -- the kinds this Port's contract
+    (classes, functions, methods, constants, and interface properties) is scoped to -- rather
+    than the full construct taxonomy `parsers.base.SymbolKind` covers.
     """
 
     CLASS = auto()
     FUNCTION = auto()
     METHOD = auto()
     CONSTANT = auto()
+    PROPERTY = auto()
 
 
 @dataclass(frozen=True, slots=True)
 class ExtractedSymbol:
-    """A single class, function, method, or constant found in a file.
+    """A single class, function, method, constant, or interface property found in a file.
 
     Attributes:
-        qualified_name: The symbol's name, qualified by its owning file and, for a method, its
-            owning class (e.g. `"src/domain/entities.py::SourceRepository.mark_ready"`), so it
-            remains unambiguous outside the context of any single `SymbolExtractionResult`. See
+        qualified_name: The symbol's name, qualified by its owning file and, for a method or an
+            interface property, its owning class or interface (e.g.
+            `"src/domain/entities.py::SourceRepository.mark_ready"` or `"ports.ts::User.id"`),
+            so it remains unambiguous outside the context of any single `SymbolExtractionResult`. See
             `build_qualified_name`.
         name: The symbol's own, unqualified name.
         kind: What kind of construct this symbol is.
@@ -186,8 +188,8 @@ def build_qualified_name(*, relative_path: str, name: str, owner: str | None = N
     Args:
         relative_path: Path of the file the symbol was found in.
         name: The symbol's own, unqualified name.
-        owner: The name of the symbol's owning class, if it is a method. None for a
-            free-standing class, function, or constant.
+        owner: The name of the symbol's owning class or interface, if it is a method or an
+            interface property. None for a free-standing class, function, or constant.
 
     Returns:
         `relative_path` joined to `name` with `"::"`, with `owner` interposed and joined to

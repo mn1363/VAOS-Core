@@ -126,7 +126,12 @@ def _write_fixture_repository(root: Path) -> None:
     web = root / "web"
     web.mkdir()
     (web / "index.ts").write_text(
-        "export interface Shape { area(): number }\n"
+        "export interface Shape { unit: string; area(): number }\n"
+        "export interface Measurable {\n"
+        "    readonly unit: string;\n"
+        "    scale?: number;\n"
+        "    area(): number;\n"
+        "}\n"
         "export const VERSION = 1;\n"
         "export class Box { size(): number { return 1; } }\n",
         encoding="utf-8",
@@ -276,7 +281,13 @@ _EXPECTED_SYMBOL_IDS = {
     f"symbol:{_SHAPES}::Renderable.render",
     f"symbol:{_SHAPES}::Drawable.draw",
     f"symbol:{_SHAPES}::make_shape",
+    f"symbol:{_INDEX}::Shape.area",
+    f"symbol:{_INDEX}::Shape.unit",
+    f"symbol:{_INDEX}::Measurable.area",
+    f"symbol:{_INDEX}::Measurable.unit",
+    f"symbol:{_INDEX}::Measurable.scale",
     f"symbol:{_INDEX}::Box",
+    f"symbol:{_INDEX}::Box.size",
     f"symbol:{_INDEX}::VERSION",
     f"symbol:{_MOD}::helper",
 }
@@ -287,6 +298,7 @@ _EXPECTED_INTERFACE_IDS = {
     f"interface:{_SHAPES}::Renderable",
     f"interface:{_SHAPES}::Drawable",
     f"interface:{_INDEX}::Shape",
+    f"interface:{_INDEX}::Measurable",
     f"interface:{_MOD}::Plugin",
 }
 
@@ -410,6 +422,8 @@ async def test_concept_attributes_carry_real_extractor_details(tmp_path: Path) -
     assert graph.get_node(f"symbol:{_SHAPES}::Shape.area").attributes == ("kind=method",)
     assert graph.get_node("symbol:app.py::main").attributes == ("kind=function",)
     assert graph.get_node("symbol:greeter.go::MaxSize").attributes == ("kind=constant",)
+    assert graph.get_node(f"symbol:{_INDEX}::Shape.unit").attributes == ("kind=property",)
+    assert graph.get_node(f"symbol:{_INDEX}::Measurable.scale").attributes == ("kind=property",)
 
     assert graph.get_node(f"interface:{_SHAPES}::Shape").attributes == (
         "origin=abstract_class",
@@ -425,6 +439,40 @@ async def test_concept_attributes_carry_real_extractor_details(tmp_path: Path) -
     capabilities = [n for n in graph.nodes if n.kind is KnowledgeNodeKind.CAPABILITY]
     assert capabilities
     assert all(node.attributes == () for node in capabilities)
+
+
+@pytest.mark.asyncio
+async def test_interface_properties_flow_into_the_graph_as_distinct_symbol_nodes(
+    tmp_path: Path,
+) -> None:
+    """Real TypeScript interface properties become SYMBOL nodes, each declared by its own file."""
+    _skip_without_git()
+    real = await _real_results(_make_source_repository(tmp_path), tmp_path, "a")
+
+    graph = _build(real)
+
+    expected = {
+        f"symbol:{_INDEX}::Shape.unit",
+        f"symbol:{_INDEX}::Measurable.unit",
+        f"symbol:{_INDEX}::Measurable.scale",
+    }
+    property_nodes = [node for node in graph.nodes if node.attributes == ("kind=property",)]
+    assert {node.identifier for node in property_nodes} == expected
+    assert all(node.kind is KnowledgeNodeKind.SYMBOL for node in property_nodes)
+    assert all(node.relative_path == _INDEX for node in property_nodes)
+    assert sorted(node.label for node in property_nodes) == ["scale", "unit", "unit"]
+
+    declares = {
+        (relation.source, relation.target)
+        for relation in graph.relations
+        if relation.kind is KnowledgeRelationKind.DECLARES
+    }
+    for identifier in expected:
+        assert (f"entity:{_INDEX}", identifier) in declares
+
+    # A property is a symbol only: it is never an interface or a capability of its own.
+    assert f"interface:{_INDEX}::Shape.unit" not in _ids(graph, KnowledgeNodeKind.INTERFACE)
+    assert f"capability:{_INDEX}::Shape.unit" not in _ids(graph, KnowledgeNodeKind.CAPABILITY)
 
 
 @pytest.mark.asyncio

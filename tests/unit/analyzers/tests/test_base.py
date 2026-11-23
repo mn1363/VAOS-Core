@@ -170,6 +170,7 @@ def test_is_test_file_recognizes_conventions(relative_path: str, expected: bool)
         ("TestSomething", ExtractedSymbolKind.CLASS, True),
         ("Something", ExtractedSymbolKind.CLASS, False),
         ("TEST_VALUE", ExtractedSymbolKind.CONSTANT, False),
+        ("test_value", ExtractedSymbolKind.PROPERTY, False),
     ],
 )
 def test_is_test_symbol_name_recognizes_conventions(

@@ -2,15 +2,16 @@
 
 `StructuralSymbolExtractor` derives a file's `ExtractedSymbol` entries directly from its
 already-parsed `parsers.base.ParseResult`: classes come from `parse_result.classes`, methods
-from each class's own `methods`, top-level functions from `parse_result.functions`, and
+from each class's own `methods`, interface signatures from `parse_result.interfaces`, top-level
+functions from `parse_result.functions`, and
 constants from the `SymbolKind.CONSTANT`-kind entries in `parse_result.symbols`. It performs no
 scope resolution, no cross-file analysis, no deduplication, and no naming heuristics; see
 `SymbolExtractor`'s own docstring in `base.py` for what is deliberately out of scope.
 
-Output order is fixed: all classes, then all methods (grouped by owning class, in class-then-
-method order), then all top-level functions, then all constants. Source order is preserved
-within each group and duplicates are never merged, matching the precedent set by
-`StructuralImportExtractor`.
+Output order is fixed: all classes, then class methods, then interface methods, then interface
+properties, then top-level functions, then constants. Methods and properties are grouped by
+owner and preserve declaration order within each group. Duplicates are never merged, matching
+the precedent set by `StructuralImportExtractor`.
 
 A `SymbolKind.CONSTANT` entry is passed through exactly as the parser produced it. Some of the
 frozen parsers that emit this kind (`GoParser`, `RustParser`, `TypeScriptParser`) do not
@@ -30,30 +31,39 @@ from src.extractors.symbols.base import (
     build_qualified_name,
     require_successful_parse,
 )
-from src.parsers.base import ParsedClass, ParsedFunction, ParsedSymbol, ParseResult, SymbolKind
+from src.parsers.base import (
+    ParsedClass,
+    ParsedFunction,
+    ParsedInterface,
+    ParsedProperty,
+    ParsedSymbol,
+    ParseResult,
+    SymbolKind,
+)
 
 
 class StructuralSymbolExtractor(SymbolExtractor):
-    """Maps a file's already-parsed classes, methods, functions, and constants onto
-    `ExtractedSymbol` values, one for one.
+    """Maps a file's already-parsed classes, methods, interface members, functions, and
+    constants onto `ExtractedSymbol` values, one for one.
 
     Stateless and dependency-free: a single instance handles `ParseResult`s from every one of
     the five existing `Parser` implementations, since each already normalizes its own language's
-    constructs into `parsers.base.ParsedClass`/`ParsedFunction`/`ParsedSymbol` before this
-    extractor ever sees them.
+    constructs into `parsers.base.ParsedClass`/`ParsedFunction`/`ParsedSymbol` (and, for
+    TypeScript, `ParsedInterface`/`ParsedProperty`) before this extractor ever sees them.
     """
 
     def extract(self, parse_result: ParseResult) -> SymbolExtractionResult:
-        """Extract one `ExtractedSymbol` per class, method, top-level function, and constant.
+        """Extract one `ExtractedSymbol` per class, method, interface member, function, and constant.
 
         Args:
             parse_result: The outcome of parsing one file, as produced by `src.parsers`.
 
         Returns:
             A successful result carrying the file's `ExtractedSymbol` entries: all classes, then
-            all methods, then all top-level functions, then all constants, in that fixed order,
-            with source order preserved within each group and duplicates included. Empty when
-            the file has none of the four.
+            all class methods, then all interface methods, then all interface properties, then
+            all top-level functions, then all constants, in that fixed order, with source order
+            preserved within each group and duplicates included. Empty when the file has none of
+            them.
 
         Raises:
             ValidationError: If `parse_result.succeeded` is False.
@@ -68,6 +78,16 @@ class StructuralSymbolExtractor(SymbolExtractor):
             for cls in parse_result.classes
             for method in cls.methods
         )
+        interface_methods = tuple(
+            _interface_method_to_symbol(parse_result.relative_path, interface, method)
+            for interface in parse_result.interfaces
+            for method in interface.methods
+        )
+        interface_properties = tuple(
+            _interface_property_to_symbol(parse_result.relative_path, interface, prop)
+            for interface in parse_result.interfaces
+            for prop in interface.properties
+        )
         functions = tuple(
             _function_to_symbol(parse_result.relative_path, function)
             for function in parse_result.functions
@@ -80,7 +100,9 @@ class StructuralSymbolExtractor(SymbolExtractor):
 
         return SymbolExtractionResult.ok(
             relative_path=parse_result.relative_path,
-            symbols=classes + methods + functions + constants,
+            symbols=(
+                classes + methods + interface_methods + interface_properties + functions + constants
+            ),
         )
 
 
@@ -124,6 +146,36 @@ def _method_to_symbol(
         kind=ExtractedSymbolKind.METHOD,
         relative_path=relative_path,
         line_number=method.line_number,
+    )
+
+
+def _interface_method_to_symbol(
+    relative_path: str, interface: ParsedInterface, method: ParsedFunction
+) -> ExtractedSymbol:
+    """Copy one interface method's fields, qualified by its owning interface."""
+    return ExtractedSymbol(
+        qualified_name=build_qualified_name(
+            relative_path=relative_path, name=method.name, owner=interface.name
+        ),
+        name=method.name,
+        kind=ExtractedSymbolKind.METHOD,
+        relative_path=relative_path,
+        line_number=method.line_number,
+    )
+
+
+def _interface_property_to_symbol(
+    relative_path: str, interface: ParsedInterface, prop: ParsedProperty
+) -> ExtractedSymbol:
+    """Copy one interface property's fields, qualified by its owning interface."""
+    return ExtractedSymbol(
+        qualified_name=build_qualified_name(
+            relative_path=relative_path, name=prop.name, owner=interface.name
+        ),
+        name=prop.name,
+        kind=ExtractedSymbolKind.PROPERTY,
+        relative_path=relative_path,
+        line_number=prop.line_number,
     )
 
 
