@@ -13,7 +13,7 @@ this repository's own established testing convention (see e.g.
 """
 
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from src.bootstrap.errors import BootstrapError
@@ -33,7 +33,7 @@ from src.collectors.local import LocalCollector
 from src.core.config import AppConfig
 from src.core.exceptions import VAOSError
 from src.core.protocols import SupportsAsyncClose
-from src.domain.entities import RepositoryProvider
+from src.domain.entities import AnalysisRun, AnalysisRunStatus, RepositoryProvider
 from src.memory.base import MemoryQuery, MemoryQueryResult, MemoryRecord, MemoryStore
 from src.pipeline.base import Step, StepExecutionError
 from src.pipeline.context import PipelineContext
@@ -190,6 +190,7 @@ async def test_build_storage_filesystem_defaults_to_a_relative_root(
     bundle = await build_storage(_config({"storage": {"backend": "filesystem"}}))
     assert bundle.resource is None
     assert await bundle.source_repository_store.list() == []
+    assert await bundle.analysis_artifact_store.list() == []
 
 
 # --- build_storage: sqlite -------------------------------------------------------------
@@ -452,3 +453,129 @@ async def test_a_lower_layers_own_validation_error_propagates_unwrapped(tmp_path
     )
     with pytest.raises(ValidationError):
         await build_application(config, extra_steps=[duplicate_step])
+
+
+@pytest.mark.asyncio
+async def test_build_application_can_persist_analysis_artifacts(
+    tmp_path: Any,
+) -> None:
+    """The optional final step uses the same configured filesystem storage bundle."""
+    storage_root = tmp_path / "storage"
+    source_root = tmp_path / "source"
+    repository_root = source_root / "demo"
+    (repository_root / ".git").mkdir(parents=True)
+    config = _config(
+        {
+            "collectors": {"backend": "local", "source": str(source_root)},
+            "storage": {"backend": "filesystem", "filesystem": {"root": str(storage_root)}},
+        }
+    )
+    pipeline = await build_application(config, persist_analysis_artifacts=True)
+    assert pipeline.steps[-1].name == "persist_analysis_artifacts"
+    assert pipeline.steps[3].name == "create_analysis_runs"
+    context = PipelineContext(
+        values={
+            "source": str(tmp_path),
+            "architecture_analysis_results": (),
+            "complexity_analysis_results": (),
+            "dependency_analysis_results": (),
+            "documentation_analysis_results": (),
+            "metrics_analysis_results": (),
+            "quality_analysis_results": (),
+            "security_analysis_results": (),
+            "tests_analysis_results": (),
+        }
+    )
+    result = await pipeline.run(context)
+    assert result.context.require("persisted_analysis_artifact_ids") == ()
+    run_ids = result.context.require("analysis_run_ids")
+    repositories = result.context.require("repositories")
+    assert set(run_ids) == {repository.id for repository in repositories}
+    from src.storage.filesystem.driver import (
+        FilesystemAnalysisArtifactStore,
+        FilesystemAnalysisRunRepository,
+    )
+
+    artifact_store = FilesystemAnalysisArtifactStore(storage_root)
+    run_store = FilesystemAnalysisRunRepository(storage_root)
+    assert await artifact_store.list() == []
+    persisted_runs = await run_store.list()
+    assert {run.id for run in persisted_runs} == set(run_ids.values())
+    assert all(run.status is AnalysisRunStatus.COMPLETED for run in persisted_runs)
+
+
+@pytest.mark.asyncio
+async def test_analysis_run_is_marked_failed_when_analysis_step_raises(
+    tmp_path: Any,
+) -> None:
+    """A failed analysis step persists FAILED status before pipeline resources close."""
+    from src.domain.entities import AnalysisRunStatus
+    from src.pipeline.base import StepExecutionError
+    from src.pipeline.steps import CallableStep
+    from src.storage.filesystem.driver import FilesystemAnalysisRunRepository
+
+    storage_root = tmp_path / "storage"
+    source_root = tmp_path / "source"
+    repository_root = source_root / "demo"
+    (repository_root / ".git").mkdir(parents=True)
+    config = _config(
+        {
+            "collectors": {"backend": "local", "source": str(source_root)},
+            "storage": {"backend": "filesystem", "filesystem": {"root": str(storage_root)}},
+        }
+    )
+
+    def fail_analysis() -> None:
+        raise RuntimeError("synthetic analyzer failure")
+
+    failing_step = CallableStep(
+        "synthetic_failure", fail_analysis, output_key="unused"
+    )
+    pipeline = await build_application(
+        config, extra_steps=(failing_step,), persist_analysis_artifacts=True
+    )
+    with pytest.raises(StepExecutionError, match="synthetic analyzer failure"):
+        await pipeline.run(PipelineContext(values={"source": str(source_root)}))
+
+    runs = await FilesystemAnalysisRunRepository(storage_root).list()
+    assert len(runs) == 1
+    assert runs[0].status is AnalysisRunStatus.FAILED
+    assert "synthetic analyzer failure" in (runs[0].error_message or "")
+    assert runs[0].completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_build_application_recovers_stale_running_analysis_runs(
+    tmp_path: Any,
+) -> None:
+    """A process restart marks old RUNNING records failed, but keeps recent runs active."""
+    from datetime import UTC, datetime, timedelta
+
+    from src.storage.filesystem.driver import FilesystemAnalysisRunRepository
+
+    storage_root = tmp_path / "storage"
+    store = FilesystemAnalysisRunRepository(storage_root)
+    stale = AnalysisRun(repository_id=uuid4())
+    stale.start()
+    stale.started_at = datetime.now(UTC) - timedelta(hours=2)
+    await store.add(stale)
+    recent = AnalysisRun(repository_id=uuid4())
+    recent.start()
+    await store.add(recent)
+
+    config = _config(
+        {
+            "collectors": {"backend": "local", "source": str(tmp_path)},
+            "storage": {"backend": "filesystem", "filesystem": {"root": str(storage_root)}},
+        }
+    )
+    await build_application(config, persist_analysis_artifacts=True)
+
+    recovered = await store.get(stale.id)
+    untouched = await store.get(recent.id)
+    assert recovered is not None
+    assert recovered.status is AnalysisRunStatus.FAILED
+    assert recovered.completed_at is not None
+    assert "process stopped" in (recovered.error_message or "")
+    assert untouched is not None
+    assert untouched.status is AnalysisRunStatus.RUNNING

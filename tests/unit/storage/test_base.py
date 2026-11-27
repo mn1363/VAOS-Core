@@ -6,11 +6,14 @@ from uuid import UUID
 
 import pytest
 from src.core.exceptions import NotFoundError, VAOSError
+from src.domain.entities import AnalysisArtifact
 from src.storage.base import (
     EntityNotFoundError,
     StorageConnectionError,
     StorageError,
     StorageIntegrityError,
+    analysis_artifact_from_dict,
+    analysis_artifact_to_dict,
     analysis_run_from_dict,
     analysis_run_to_dict,
     finding_from_dict,
@@ -215,3 +218,61 @@ def test_finding_to_dict_stringifies_source_file_id_when_present() -> None:
     assert isinstance(data["source_file_id"], str)
     assert finding.source_file_id is not None
     assert UUID(data["source_file_id"]) == finding.source_file_id
+
+
+# --- AnalysisArtifact ----------------------------------------------------------------------
+
+
+def test_analysis_artifact_round_trips_every_field() -> None:
+    """The storage representation must preserve identity, scope, version and payload."""
+    original = AnalysisArtifact(
+        analysis_run_id=UUID("00000000-0000-0000-0000-000000000001"),
+        repository_id=UUID("00000000-0000-0000-0000-000000000002"),
+        artifact_type="architecture.graph",
+        producer="architecture",
+        schema_version=2,
+        source_file_id=UUID("00000000-0000-0000-0000-000000000003"),
+        payload={"nodes": [{"id": "a"}], "summary": {"count": 1}},
+    )
+
+    data = analysis_artifact_to_dict(original)
+    reconstructed = analysis_artifact_from_dict(data)
+
+    assert reconstructed.id == original.id
+    assert reconstructed.created_at == original.created_at
+    assert reconstructed.updated_at == original.updated_at
+    assert reconstructed.analysis_run_id == original.analysis_run_id
+    assert reconstructed.repository_id == original.repository_id
+    assert reconstructed.artifact_type == original.artifact_type
+    assert reconstructed.producer == original.producer
+    assert reconstructed.schema_version == original.schema_version
+    assert reconstructed.source_file_id == original.source_file_id
+    assert reconstructed.payload == original.payload
+    assert data["analysis_run_id"] == str(original.analysis_run_id)
+    assert data["repository_id"] == str(original.repository_id)
+    assert data["source_file_id"] == str(original.source_file_id)
+
+
+def test_analysis_artifact_round_trips_without_source_file() -> None:
+    """Repository-wide artifacts must retain a null source_file_id."""
+    original = AnalysisArtifact(
+        analysis_run_id=UUID("00000000-0000-0000-0000-000000000011"),
+        repository_id=UUID("00000000-0000-0000-0000-000000000012"),
+        artifact_type="metrics.repository",
+        producer="metrics",
+        payload={"files": 4},
+    )
+
+    data = analysis_artifact_to_dict(original)
+    assert data["source_file_id"] is None
+    assert analysis_artifact_from_dict(data).source_file_id is None
+
+
+def test_analysis_run_retry_lineage_round_trips() -> None:
+    original = make_analysis_run(
+        retry_of_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+        attempt_number=3,
+    )
+    reconstructed = analysis_run_from_dict(analysis_run_to_dict(original))
+    assert reconstructed.retry_of_id == original.retry_of_id
+    assert reconstructed.attempt_number == 3

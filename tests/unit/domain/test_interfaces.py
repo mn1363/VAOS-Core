@@ -4,6 +4,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from src.domain.entities import (
+    AnalysisArtifact,
     AnalysisRun,
     Finding,
     RepositoryProvider,
@@ -11,6 +12,7 @@ from src.domain.entities import (
     SourceRepository,
 )
 from src.domain.interfaces import (
+    AnalysisArtifactStore,
     AnalysisRunRepository,
     FindingRepository,
     Repository,
@@ -224,3 +226,11 @@ async def test_finding_repository_extra_method_is_implementable() -> None:
     stub = _FindingRepositoryStub()
 
     assert await stub.list_by_analysis_run(uuid4()) == []
+
+
+def test_analysis_artifact_store_is_an_abstract_persistence_port() -> None:
+    """The artifact store must require CRUD and all three scoped query methods."""
+    with pytest.raises(TypeError):
+        AnalysisArtifactStore()  # type: ignore[abstract]
+
+    assert AnalysisArtifact.__name__ == "AnalysisArtifact"

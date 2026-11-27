@@ -8,7 +8,7 @@ concrete adapters implementing these Ports.
 from abc import ABC, abstractmethod
 from uuid import UUID
 
-from .entities import AnalysisRun, Finding, SourceFile, SourceRepository
+from .entities import AnalysisArtifact, AnalysisRun, Finding, SourceFile, SourceRepository
 
 
 class Repository[EntityT](ABC):
@@ -135,4 +135,25 @@ class FindingRepository(Repository[Finding], ABC):
         Returns:
             Every `Finding` whose `analysis_run_id` matches.
         """
+        ...
+
+
+class AnalysisArtifactStore(Repository[AnalysisArtifact], ABC):
+    """Persistence Port for versioned `AnalysisArtifact` records."""
+
+    @abstractmethod
+    async def list_by_analysis_run(self, analysis_run_id: UUID) -> list[AnalysisArtifact]:
+        """Retrieve all artifacts produced by one analysis run."""
+        ...
+
+    @abstractmethod
+    async def list_by_repository(self, repository_id: UUID) -> list[AnalysisArtifact]:
+        """Retrieve all artifacts for one repository, across its analysis runs."""
+        ...
+
+    @abstractmethod
+    async def list_by_type(
+        self, analysis_run_id: UUID, artifact_type: str
+    ) -> list[AnalysisArtifact]:
+        """Retrieve artifacts of one type within one analysis run."""
         ...

@@ -35,6 +35,7 @@ from __future__ import annotations
 import functools
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -50,8 +51,9 @@ from src.collectors.local import LocalCollector
 from src.core.config import AppConfig, load_config
 from src.core.protocols import SupportsAsyncClose
 from src.core.utils import ensure_directory
-from src.domain.entities import SourceRepository
+from src.domain.entities import AnalysisRunStatus, SourceRepository
 from src.domain.interfaces import (
+    AnalysisArtifactStore,
     AnalysisRunRepository,
     FindingRepository,
     SourceFileRepository,
@@ -65,12 +67,14 @@ from src.pipeline.steps import CallableStep, MapStep
 from src.repository.git import GitRepositoryClient
 from src.repository.workspace import FilesystemWorkspaceManager
 from src.storage.filesystem.driver import (
+    FilesystemAnalysisArtifactStore,
     FilesystemAnalysisRunRepository,
     FilesystemFindingRepository,
     FilesystemSourceFileRepository,
     FilesystemSourceRepositoryStore,
 )
 from src.storage.postgres.driver import (
+    PostgresAnalysisArtifactStore,
     PostgresAnalysisRunRepository,
     PostgresFindingRepository,
     PostgresSourceFileRepository,
@@ -81,6 +85,7 @@ from src.storage.postgres.driver import connect as _postgres_connect
 from src.storage.postgres.driver import initialize_schema as _postgres_initialize_schema
 from src.storage.qdrant.driver import QdrantVectorStore
 from src.storage.sqlite.driver import (
+    SqliteAnalysisArtifactStore,
     SqliteAnalysisRunRepository,
     SqliteFindingRepository,
     SqliteSourceFileRepository,
@@ -142,15 +147,59 @@ class _CallbackCloser:
         await self._close()
 
 
+_ANALYSIS_RUN_STALE_AFTER = timedelta(hours=1)
+
+
+async def _recover_interrupted_analysis_runs(store: AnalysisRunRepository) -> int:
+    """Fail runs left active for more than one hour by a prior process."""
+    cutoff = datetime.now(UTC) - _ANALYSIS_RUN_STALE_AFTER
+    recovered = 0
+    for run in await store.list():
+        if (
+            run.status is AnalysisRunStatus.RUNNING
+            and run.started_at is not None
+            and run.started_at < cutoff
+        ):
+            run.fail("Analysis process stopped before the run reached a terminal state")
+            await store.update(run)
+            recovered += 1
+    return recovered
+
+
+class _AnalysisRunFailureGuard(Step):
+    """Mark active analysis runs as failed when a wrapped step raises."""
+
+    def __init__(self, step: Step, store: AnalysisRunRepository) -> None:
+        self._step = step
+        self._store = store
+
+    @property
+    def name(self) -> str:
+        return self._step.name
+
+    async def execute(self, context: PipelineContext) -> PipelineContext:
+        try:
+            return await self._step.execute(context)
+        except Exception as exc:
+            run_ids = context.get("analysis_run_ids", {})
+            for run_id in run_ids.values():
+                run = await self._store.get(run_id)
+                if run is not None and run.status.value in ("pending", "running"):
+                    run.fail(f"{self._step.name}: {exc}")
+                    await self._store.update(run)
+            raise
+
+
 @dataclass(frozen=True, slots=True)
 class StorageBundle:
-    """The four concrete entity-persistence Ports for one configured storage backend.
+    """The five concrete entity-persistence Ports for one configured storage backend.
 
     Attributes:
         source_repository_store: Concrete `SourceRepositoryStore` for the selected backend.
         source_file_repository: Concrete `SourceFileRepository` for the selected backend.
         analysis_run_repository: Concrete `AnalysisRunRepository` for the selected backend.
         finding_repository: Concrete `FindingRepository` for the selected backend.
+        analysis_artifact_store: Concrete `AnalysisArtifactStore` for the selected backend.
         resource: A `SupportsAsyncClose` adapter for the backend's own backing connection, or
             None for a backend (`"filesystem"`) with no connection to release.
     """
@@ -159,6 +208,7 @@ class StorageBundle:
     source_file_repository: SourceFileRepository
     analysis_run_repository: AnalysisRunRepository
     finding_repository: FindingRepository
+    analysis_artifact_store: AnalysisArtifactStore
     resource: SupportsAsyncClose | None
 
 
@@ -231,7 +281,7 @@ async def build_storage(config: AppConfig) -> StorageBundle:
     """Construct the concrete `Storage` Ports for `config`.
 
     Performs whichever backend-specific connect/initialize-schema sequence the selected backend
-    requires, then constructs the four `Repository` Ports around the resulting connection (or,
+    requires, then constructs the five `Repository` Ports around the resulting connection (or,
     for `"filesystem"`, around the configured root directory directly). See
     `storage.sqlite.driver`/`storage.postgres.driver`'s own module docstrings for why this
     sequence is kept separate from each store's own `__init__`.
@@ -244,7 +294,7 @@ async def build_storage(config: AppConfig) -> StorageBundle:
             (required, no default).
 
     Returns:
-        A `StorageBundle` holding the four concrete Ports and, for `"sqlite"`/`"postgres"`, a
+        A `StorageBundle` holding the five concrete Ports and, for `"sqlite"`/`"postgres"`, a
         `SupportsAsyncClose` resource wrapping the backing connection.
 
     Raises:
@@ -262,6 +312,7 @@ async def build_storage(config: AppConfig) -> StorageBundle:
             source_file_repository=FilesystemSourceFileRepository(root),
             analysis_run_repository=FilesystemAnalysisRunRepository(root),
             finding_repository=FilesystemFindingRepository(root),
+            analysis_artifact_store=FilesystemAnalysisArtifactStore(root),
             resource=None,
         )
 
@@ -275,6 +326,7 @@ async def build_storage(config: AppConfig) -> StorageBundle:
             source_file_repository=SqliteSourceFileRepository(sqlite_connection),
             analysis_run_repository=SqliteAnalysisRunRepository(sqlite_connection),
             finding_repository=SqliteFindingRepository(sqlite_connection),
+            analysis_artifact_store=SqliteAnalysisArtifactStore(sqlite_connection),
             resource=_CallbackCloser(
                 functools.partial(_sqlite_close_connection, sqlite_connection)
             ),
@@ -294,6 +346,7 @@ async def build_storage(config: AppConfig) -> StorageBundle:
             source_file_repository=PostgresSourceFileRepository(postgres_connection),
             analysis_run_repository=PostgresAnalysisRunRepository(postgres_connection),
             finding_repository=PostgresFindingRepository(postgres_connection),
+            analysis_artifact_store=PostgresAnalysisArtifactStore(postgres_connection),
             resource=_CallbackCloser(
                 functools.partial(_postgres_close_connection, postgres_connection)
             ),
@@ -407,6 +460,7 @@ async def build_application(
     *,
     memory_store: MemoryStore | None = None,
     extra_steps: Sequence[Step] = (),
+    persist_analysis_artifacts: bool = False,
 ) -> Pipeline:
     """Construct every concrete Port this layer's default flow needs and assemble a `Pipeline`.
 
@@ -424,6 +478,10 @@ async def build_application(
             `__init__.py` for why. Passed straight into the assembled `Pipeline`'s `resources`.
         extra_steps: Additional `Step`s appended, in order, after this layer's own three
             default steps.
+        persist_analysis_artifacts: If True, create one `AnalysisRun` per collected repository
+            before `extra_steps`, then persist their analyzer outputs and mark successful runs
+            completed after `extra_steps`. Requires the analysis steps to write all eight result
+            groups to the pipeline context. Defaults to False.
 
     Returns:
         A `Pipeline` ready to run against a `PipelineContext` seeded with `"source"` -- see
@@ -442,6 +500,8 @@ async def build_application(
 
     collector = build_collector(resolved_config)
     storage = await build_storage(resolved_config)
+    if persist_analysis_artifacts:
+        await _recover_interrupted_analysis_runs(storage.analysis_run_repository)
     vector_store = await build_vector_store(resolved_config)
 
     collect_step: Step = CallableStep(
@@ -464,7 +524,29 @@ async def build_application(
         output_key="persisted_repository_ids",
         is_async=True,
     )
-    steps: list[Step] = [collect_step, unpack_step, persist_step, *extra_steps]
+    steps: list[Step] = [collect_step, unpack_step, persist_step]
+    if persist_analysis_artifacts:
+        from src.bootstrap.analysis_steps import (
+            build_analysis_artifact_persistence_step,
+            build_analysis_run_creation_step,
+        )
+
+        steps.append(build_analysis_run_creation_step(storage.analysis_run_repository))
+    if persist_analysis_artifacts:
+        steps.extend(
+            _AnalysisRunFailureGuard(step, storage.analysis_run_repository)
+            for step in extra_steps
+        )
+        steps.append(
+            _AnalysisRunFailureGuard(
+                build_analysis_artifact_persistence_step(
+                    storage.analysis_artifact_store, storage.analysis_run_repository
+                ),
+                storage.analysis_run_repository,
+            )
+        )
+    else:
+        steps.extend(extra_steps)
 
     resources: list[SupportsAsyncClose] = []
     if storage.resource is not None:
@@ -482,6 +564,7 @@ async def bootstrap(
     *,
     memory_store: MemoryStore | None = None,
     extra_steps: Sequence[Step] = (),
+    persist_analysis_artifacts: bool = False,
     context: PipelineContext | None = None,
 ) -> PipelineResult:
     """Construct and run one complete, `bootstrap`-composed analysis flow.
@@ -496,6 +579,9 @@ async def bootstrap(
             through to `build_application` unchanged.
         extra_steps: Additional `Step`s appended after this layer's own default steps. Passed
             through to `build_application` unchanged.
+        persist_analysis_artifacts: Passed to `build_application`; creates and completes analysis
+            runs and persists analyzer results when enabled. The supplied `extra_steps` must
+            populate the analysis result context keys. Defaults to False.
         context: Initial `PipelineContext` the assembled `Pipeline` runs against. Defaults to a
             fresh `PipelineContext` seeded with `"source"`, read from `collectors.source`
             (default `"."`) -- the one value the default flow's `collect` step requires.
@@ -510,7 +596,10 @@ async def bootstrap(
     """
     resolved_config = config if config is not None else load_config()
     pipeline = await build_application(
-        resolved_config, memory_store=memory_store, extra_steps=extra_steps
+        resolved_config,
+        memory_store=memory_store,
+        extra_steps=extra_steps,
+        persist_analysis_artifacts=persist_analysis_artifacts,
     )
     resolved_context = (
         context

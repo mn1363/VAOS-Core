@@ -51,6 +51,14 @@ _DEFAULT_STEP_NAMES = [
     "extract_architecture",
     "extract_interfaces",
     "extract_foundation",
+    "analyze_architecture",
+    "analyze_complexity",
+    "analyze_dependencies",
+    "analyze_documentation",
+    "analyze_metrics",
+    "analyze_quality",
+    "analyze_security",
+    "analyze_tests",
     "build_architecture_graph",
     "build_dependency_graph",
 ]
@@ -477,7 +485,7 @@ def test_each_factory_call_builds_an_independent_step() -> None:
 
 
 def test_the_default_composition_is_unchanged_and_does_not_contain_the_step(tmp_path: Path) -> None:
-    """`build_analysis_steps` still returns exactly its thirteen steps, in the pinned order."""
+    """`build_analysis_steps` still returns exactly its twenty-one steps, in the pinned order."""
     config = AppConfig(raw={"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
     assert [step.name for step in steps] == _DEFAULT_STEP_NAMES

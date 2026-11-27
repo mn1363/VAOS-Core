@@ -15,6 +15,7 @@ from uuid import UUID
 
 from src.core.exceptions import NotFoundError, VAOSError
 from src.domain.entities import (
+    AnalysisArtifact,
     AnalysisRun,
     AnalysisRunStatus,
     Finding,
@@ -223,6 +224,8 @@ def analysis_run_to_dict(entity: AnalysisRun) -> dict[str, Any]:
         "started_at": _optional_datetime_to_str(entity.started_at),
         "completed_at": _optional_datetime_to_str(entity.completed_at),
         "error_message": entity.error_message,
+        "retry_of_id": str(entity.retry_of_id) if entity.retry_of_id is not None else None,
+        "attempt_number": entity.attempt_number,
     }
 
 
@@ -244,6 +247,8 @@ def analysis_run_from_dict(data: dict[str, Any]) -> AnalysisRun:
         started_at=_optional_str_to_datetime(data["started_at"]),
         completed_at=_optional_str_to_datetime(data["completed_at"]),
         error_message=data["error_message"],
+        retry_of_id=UUID(data["retry_of_id"]) if data.get("retry_of_id") else None,
+        attempt_number=int(data.get("attempt_number", 1)),
     )
 
 
@@ -291,4 +296,35 @@ def finding_from_dict(data: dict[str, Any]) -> Finding:
         severity=FindingSeverity(data["severity"]),
         score=data["score"],
         metadata=dict(data["metadata"]),
+    )
+
+
+def analysis_artifact_to_dict(entity: AnalysisArtifact) -> dict[str, Any]:
+    """Serialize an `AnalysisArtifact` to a JSON-safe, backend-neutral dict."""
+    return {
+        **_entity_base_to_dict(entity.id, entity.created_at, entity.updated_at),
+        "analysis_run_id": str(entity.analysis_run_id),
+        "repository_id": str(entity.repository_id),
+        "artifact_type": entity.artifact_type,
+        "producer": entity.producer,
+        "schema_version": entity.schema_version,
+        "source_file_id": str(entity.source_file_id) if entity.source_file_id is not None else None,
+        "payload": dict(entity.payload),
+    }
+
+
+def analysis_artifact_from_dict(data: dict[str, Any]) -> AnalysisArtifact:
+    """Reconstruct an `AnalysisArtifact` from `analysis_artifact_to_dict` output."""
+    source_file_id = data["source_file_id"]
+    return AnalysisArtifact(
+        id=UUID(data["id"]),
+        created_at=datetime.fromisoformat(data["created_at"]),
+        updated_at=datetime.fromisoformat(data["updated_at"]),
+        analysis_run_id=UUID(data["analysis_run_id"]),
+        repository_id=UUID(data["repository_id"]),
+        artifact_type=data["artifact_type"],
+        producer=data["producer"],
+        schema_version=data["schema_version"],
+        source_file_id=UUID(source_file_id) if source_file_id is not None else None,
+        payload=dict(data["payload"]),
     )

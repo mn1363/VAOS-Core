@@ -9,21 +9,32 @@ access, or filesystem-tree walking against a real git repository -- see
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 from src.bootstrap.analysis_steps import (
+    RepositoryScoped,
     _all_parsers,
     _clone_repository_func,
     _enumerate_files,
     _parse_files_func,
+    _persist_analysis_artifacts_func,
     _require_single_repository,
     _select_successful_parse_results,
+    build_analysis_run_creation_step,
     build_analysis_steps,
 )
 from src.core.config import AppConfig
-from src.domain.entities import RepositoryProvider, SourceLanguage, SourceRepository
+from src.domain.entities import (
+    AnalysisArtifact,
+    AnalysisRun,
+    AnalysisRunStatus,
+    RepositoryProvider,
+    SourceLanguage,
+    SourceRepository,
+)
 from src.graph.dependency.structural import StructuralDependencyGraphBuilder
 from src.parsers.base import FileMetadata, ParseResult, compute_content_hash
 from src.parsers.cpp.parser import CppParser
@@ -34,6 +45,10 @@ from src.parsers.typescript.parser import TypeScriptParser
 from src.pipeline.context import PipelineContext
 from src.pipeline.steps import CallableStep, MapStep
 from src.repository.base import RepositoryClient, WorkspaceManager
+from src.storage.filesystem.driver import (
+    FilesystemAnalysisArtifactStore,
+    FilesystemAnalysisRunRepository,
+)
 
 
 def _config(raw: dict[str, object]) -> AppConfig:
@@ -285,23 +300,31 @@ _EXPECTED_STEP_NAMES = [
     "extract_architecture",
     "extract_interfaces",
     "extract_foundation",
+    "analyze_architecture",
+    "analyze_complexity",
+    "analyze_dependencies",
+    "analyze_documentation",
+    "analyze_metrics",
+    "analyze_quality",
+    "analyze_security",
+    "analyze_tests",
     "build_architecture_graph",
     "build_dependency_graph",
 ]
 
 _PREVIOUS_ELEVEN_STEP_NAMES = _EXPECTED_STEP_NAMES[:11]
-_PREVIOUS_TWELVE_STEP_NAMES = _EXPECTED_STEP_NAMES[:12]
+_PREVIOUS_TWELVE_STEP_NAMES = _EXPECTED_STEP_NAMES[:11] + ["build_architecture_graph"]
 
 
 def test_build_analysis_steps_exact_names(tmp_path: Path) -> None:
-    """The thirteen returned steps carry exactly these names -- no more, no fewer, none renamed."""
+    """The twenty-one returned steps carry exactly these names -- no more, no fewer, none renamed."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
     assert sorted(step.name for step in steps) == sorted(_EXPECTED_STEP_NAMES)
 
 
 def test_build_analysis_steps_exact_order(tmp_path: Path) -> None:
-    """The thirteen returned steps appear in this exact, fixed order."""
+    """The twenty-one returned steps appear in this exact, fixed order."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
     assert [step.name for step in steps] == _EXPECTED_STEP_NAMES
@@ -324,6 +347,14 @@ def test_build_analysis_steps_exact_is_async(tmp_path: Path) -> None:
         "extract_architecture": False,
         "extract_interfaces": False,
         "extract_foundation": False,
+        "analyze_architecture": False,
+        "analyze_complexity": False,
+        "analyze_dependencies": False,
+        "analyze_documentation": False,
+        "analyze_metrics": False,
+        "analyze_quality": False,
+        "analyze_security": False,
+        "analyze_tests": False,
         "build_architecture_graph": False,
         "build_dependency_graph": False,
     }
@@ -360,6 +391,14 @@ def test_build_analysis_steps_exact_input_and_output_keys(tmp_path: Path) -> Non
         "extract_architecture": (("successful_parse_results",), "architecture_results"),
         "extract_interfaces": (("successful_parse_results",), "interface_results"),
         "extract_foundation": (("successful_parse_results",), "foundation_results"),
+        "analyze_architecture": (("architecture_results",), "architecture_analysis_results"),
+        "analyze_complexity": (("ast_results",), "complexity_analysis_results"),
+        "analyze_dependencies": (("import_results",), "dependency_analysis_results"),
+        "analyze_documentation": (("ast_results",), "documentation_analysis_results"),
+        "analyze_metrics": (("ast_results",), "metrics_analysis_results"),
+        "analyze_quality": (("foundation_results",), "quality_analysis_results"),
+        "analyze_security": (("import_results",), "security_analysis_results"),
+        "analyze_tests": (("symbol_results",), "tests_analysis_results"),
         "build_architecture_graph": (
             ("repositories", "architecture_results"),
             "architecture_graph",
@@ -386,10 +425,10 @@ def test_build_analysis_steps_extractor_output_keys(tmp_path: Path) -> None:
 
 
 def test_build_analysis_steps_returns_exactly_thirteen(tmp_path: Path) -> None:
-    """`build_analysis_steps` returns exactly thirteen `Step`s -- no more, no fewer."""
+    """`build_analysis_steps` returns exactly twenty-one `Step`s -- no more, no fewer."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
-    assert len(steps) == 13
+    assert len(steps) == 21
 
 
 def test_build_analysis_steps_previous_eleven_keep_names_and_order(tmp_path: Path) -> None:
@@ -417,7 +456,8 @@ def test_build_analysis_steps_previous_twelve_keep_names_and_order(tmp_path: Pat
     appended -- retain their exact pre-existing names and order; none is renamed or reordered."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
-    assert [step.name for step in steps[:12]] == _PREVIOUS_TWELVE_STEP_NAMES
+    assert [step.name for step in steps[:11]] == _PREVIOUS_TWELVE_STEP_NAMES[:11]
+    assert steps[-2].name == "build_architecture_graph"
     assert _PREVIOUS_TWELVE_STEP_NAMES == [
         "require_single_repository",
         "clone_repositories",
@@ -441,8 +481,8 @@ def test_build_architecture_graph_keeps_its_position_and_is_no_longer_last(
     `extract_foundation`, and now has exactly one successor."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     steps = build_analysis_steps(config)
-    assert steps[11].name == "build_architecture_graph"
-    assert steps[10].name == "extract_foundation"
+    assert steps[-2].name == "build_architecture_graph"
+    assert steps[-3].name == "analyze_tests"
     assert [step.name for step in steps].count("build_architecture_graph") == 1
 
 
@@ -451,7 +491,9 @@ def test_build_architecture_graph_step_contract(tmp_path: Path) -> None:
     `architecture_results` and writing `architecture_graph`, bound to
     `StructuralArchitectureGraphBuilder().build` -- unchanged by the dependency graph step."""
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
-    step = build_analysis_steps(config)[11]
+    step = next(
+        item for item in build_analysis_steps(config) if item.name == "build_architecture_graph"
+    )
     assert step.name == "build_architecture_graph"
     assert isinstance(step, CallableStep)
     assert step._input_keys == ("repositories", "architecture_results")  # type: ignore[attr-defined]
@@ -506,3 +548,129 @@ async def test_build_dependency_graph_step_writes_the_builders_graph(tmp_path: P
 
     assert returned.require("dependency_graph") == StructuralDependencyGraphBuilder().build(())
     assert returned.require("import_results") == ()
+
+
+@dataclass
+class _ArtifactTestResult:
+    relative_path: str
+    succeeded: bool
+    details: dict[str, int]
+
+
+@pytest.mark.asyncio
+async def test_analysis_artifact_persistence_step_serializes_and_scopes_results(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemAnalysisArtifactStore(tmp_path)
+    repository_id = UUID("11111111-1111-1111-1111-111111111111")
+    analysis_run_id = UUID("22222222-2222-2222-2222-222222222222")
+    result = _ArtifactTestResult(
+        relative_path="src/main.py", succeeded=True, details={"symbols": 4}
+    )
+    persist = _persist_analysis_artifacts_func(store)
+
+    artifact_ids = await persist(
+        {repository_id: analysis_run_id},
+        (RepositoryScoped(repository_id, result),),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+        (),
+    )
+
+    artifacts = await store.list_by_analysis_run(analysis_run_id)
+    assert len(artifact_ids) == 1
+    assert len(artifacts) == 1
+    assert artifacts[0].id == artifact_ids[0]
+    assert artifacts[0].repository_id == repository_id
+    assert artifacts[0].artifact_type == "architecture.analysis"
+    assert artifacts[0].producer == "StructuralArchitectureAnalyzer"
+    assert artifacts[0].payload == {
+        "relative_path": "src/main.py",
+        "succeeded": True,
+        "details": {"symbols": 4},
+    }
+
+
+@pytest.mark.asyncio
+async def test_analysis_artifact_persistence_requires_run_id_for_each_repository(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemAnalysisArtifactStore(tmp_path)
+    repository_id = UUID("11111111-1111-1111-1111-111111111111")
+    persist = _persist_analysis_artifacts_func(store)
+
+    with pytest.raises(ValueError, match="missing AnalysisRun ID"):
+        await persist(
+            {},
+            (RepositoryScoped(repository_id, _ArtifactTestResult("a.py", True, {})),),
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+            (),
+        )
+
+
+@pytest.mark.asyncio
+async def test_analysis_run_creation_step_creates_retry_attempt(tmp_path: Path) -> None:
+    store = FilesystemAnalysisRunRepository(tmp_path)
+    artifact_store = FilesystemAnalysisArtifactStore(tmp_path / "artifacts")
+    repository = _repository("retry-repository")
+    failed = AnalysisRun(repository_id=repository.id)
+    failed.start()
+    failed.fail("previous attempt failed")
+    await store.add(failed)
+
+    old_artifact = AnalysisArtifact(
+        analysis_run_id=failed.id,
+        repository_id=repository.id,
+        artifact_type="test.summary",
+        producer="test",
+        payload={"preserved": True},
+    )
+    await artifact_store.add(old_artifact)
+
+    context = PipelineContext(
+        values={"repositories": (repository,), "retry_of_ids": {repository.id: failed.id}}
+    )
+    await build_analysis_run_creation_step(store).execute(context)
+
+    retry_id = context.require("analysis_run_ids")[repository.id]
+    retry = await store.get(retry_id)
+    original = await store.get(failed.id)
+    assert retry is not None
+    assert retry.status is AnalysisRunStatus.RUNNING
+    assert retry.retry_of_id == failed.id
+    assert retry.attempt_number == 2
+    assert original is not None
+    assert original.status is AnalysisRunStatus.FAILED
+
+    retained_artifacts = await artifact_store.list_by_analysis_run(failed.id)
+    retry_artifacts = await artifact_store.list_by_analysis_run(retry.id)
+    assert [item.id for item in retained_artifacts] == [old_artifact.id]
+    assert retained_artifacts[0].payload == {"preserved": True}
+    assert retry_artifacts == []
+
+
+@pytest.mark.asyncio
+async def test_analysis_run_creation_rejects_retry_from_another_repository(
+    tmp_path: Path,
+) -> None:
+    store = FilesystemAnalysisRunRepository(tmp_path)
+    repository = _repository("target")
+    other = AnalysisRun(repository_id=UUID(int=123))
+    other.start()
+    other.fail("failed")
+    await store.add(other)
+
+    context = PipelineContext(
+        values={"repositories": (repository,), "retry_of_ids": {repository.id: other.id}}
+    )
+    with pytest.raises(ValueError, match="another repository"):
+        await build_analysis_run_creation_step(store).execute(context)

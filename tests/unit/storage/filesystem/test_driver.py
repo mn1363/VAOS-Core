@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 from src.storage.base import EntityNotFoundError, StorageError, StorageIntegrityError
 from src.storage.filesystem.driver import (
+    FilesystemAnalysisArtifactStore,
     FilesystemAnalysisRunRepository,
     FilesystemFindingRepository,
     FilesystemSourceFileRepository,
@@ -18,6 +19,7 @@ from src.storage.filesystem.driver import (
 )
 
 from tests.unit.storage._fixtures import (
+    make_analysis_artifact,
     make_analysis_run,
     make_finding,
     make_source_file,
@@ -295,3 +297,31 @@ async def test_list_by_analysis_run_filters_correctly(tmp_path: Path) -> None:
     result = await store.list_by_analysis_run(target_run)
 
     assert [f.id for f in result] == [matching.id]
+
+
+@pytest.mark.asyncio
+async def test_analysis_artifact_store_round_trip_and_scoped_queries(tmp_path: Path) -> None:
+    store = FilesystemAnalysisArtifactStore(tmp_path)
+    artifact = make_analysis_artifact()
+    other_run = make_analysis_artifact(
+        id=uuid4(), analysis_run_id=uuid4(), artifact_type="summary", source_file_id=None
+    )
+    other_repo = make_analysis_artifact(
+        id=uuid4(), repository_id=uuid4(), analysis_run_id=uuid4()
+    )
+    await store.add(artifact)
+    await store.add(other_run)
+    await store.add(other_repo)
+
+    fetched = await store.get(artifact.id)
+    assert fetched == artifact
+    assert [item.id for item in await store.list_by_analysis_run(artifact.analysis_run_id)] == [artifact.id]
+    assert {item.id for item in await store.list_by_repository(artifact.repository_id)} == {artifact.id, other_run.id}
+    assert [item.id for item in await store.list_by_type(artifact.analysis_run_id, "structural_graph")] == [artifact.id]
+    assert (await store.get(other_run.id)).source_file_id is None  # type: ignore[union-attr]
+
+    artifact.payload["count"] = 9
+    await store.update(artifact)
+    assert (await store.get(artifact.id)).payload["count"] == 9  # type: ignore[union-attr]
+    await store.delete(artifact.id)
+    assert await store.get(artifact.id) is None

@@ -32,6 +32,9 @@ functions, unmodified, across all three entity-persisting backends (see
 the same semantics `storage.filesystem` and `storage.sqlite` establish.
 """
 
+from __future__ import annotations
+
+import builtins
 import json
 from typing import Any, Protocol
 from uuid import UUID
@@ -39,8 +42,9 @@ from uuid import UUID
 import asyncpg  # type: ignore[import-untyped]  # no py.typed marker; see module docstring
 
 from src.core.logging import get_logger
-from src.domain.entities import AnalysisRun, Finding, SourceFile, SourceRepository
+from src.domain.entities import AnalysisArtifact, AnalysisRun, Finding, SourceFile, SourceRepository
 from src.domain.interfaces import (
+    AnalysisArtifactStore,
     AnalysisRunRepository,
     FindingRepository,
     SourceFileRepository,
@@ -51,6 +55,8 @@ from ..base import (
     EntityNotFoundError,
     StorageConnectionError,
     StorageIntegrityError,
+    analysis_artifact_from_dict,
+    analysis_artifact_to_dict,
     analysis_run_from_dict,
     analysis_run_to_dict,
     finding_from_dict,
@@ -60,6 +66,20 @@ from ..base import (
     source_repository_from_dict,
     source_repository_to_dict,
 )
+
+
+def _encode_payload(record: dict[str, Any]) -> dict[str, Any]:
+    encoded = dict(record)
+    encoded["payload"] = json.dumps(record["payload"], allow_nan=False)
+    return encoded
+
+
+def _decode_payload(record: dict[str, Any]) -> dict[str, Any]:
+    decoded = dict(record)
+    payload = decoded["payload"]
+    decoded["payload"] = json.loads(payload) if isinstance(payload, str) else dict(payload)
+    return decoded
+
 
 _logger = get_logger("storage.postgres")
 
@@ -96,6 +116,8 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
     started_at TEXT,
     completed_at TEXT,
     error_message TEXT,
+    retry_of_id TEXT,
+    attempt_number INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -116,6 +138,26 @@ CREATE TABLE IF NOT EXISTS findings (
 );
 
 CREATE INDEX IF NOT EXISTS ix_findings_analysis_run_id ON findings (analysis_run_id);
+
+CREATE TABLE IF NOT EXISTS analysis_artifacts (
+    id TEXT PRIMARY KEY,
+    analysis_run_id TEXT NOT NULL,
+    repository_id TEXT NOT NULL,
+    artifact_type TEXT NOT NULL,
+    producer TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    source_file_id TEXT,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS ix_analysis_artifacts_analysis_run_id
+    ON analysis_artifacts (analysis_run_id);
+CREATE INDEX IF NOT EXISTS ix_analysis_artifacts_repository_id
+    ON analysis_artifacts (repository_id);
+CREATE INDEX IF NOT EXISTS ix_analysis_artifacts_run_type
+    ON analysis_artifacts (analysis_run_id, artifact_type);
 """
 
 _SOURCE_REPOSITORY_COLUMNS = (
@@ -146,6 +188,8 @@ _ANALYSIS_RUN_COLUMNS = (
     "started_at",
     "completed_at",
     "error_message",
+    "retry_of_id",
+    "attempt_number",
     "created_at",
     "updated_at",
 )
@@ -161,6 +205,20 @@ _FINDING_COLUMNS = (
     "created_at",
     "updated_at",
 )
+
+_ANALYSIS_ARTIFACT_COLUMNS = (
+    "id",
+    "analysis_run_id",
+    "repository_id",
+    "artifact_type",
+    "producer",
+    "schema_version",
+    "source_file_id",
+    "payload",
+    "created_at",
+    "updated_at",
+)
+
 
 
 class _AsyncpgConnectionLike(Protocol):
@@ -271,6 +329,13 @@ async def initialize_schema(conn: _AsyncpgConnectionLike) -> None:
     """
     try:
         await conn.execute(_SCHEMA)
+        await conn.execute(
+            "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS retry_of_id TEXT"
+        )
+        await conn.execute(
+            "ALTER TABLE analysis_runs ADD COLUMN IF NOT EXISTS "
+            "attempt_number INTEGER NOT NULL DEFAULT 1"
+        )
     except asyncpg.PostgresError as exc:
         raise StorageConnectionError(f"could not initialize PostgreSQL schema: {exc}") from exc
 
@@ -701,3 +766,50 @@ class PostgresFindingRepository(FindingRepository):
     async def list(self) -> list[Finding]:
         """Retrieve every stored finding."""
         return [finding_from_dict(_decode_metadata(r)) for r in await self._table.list_all()]
+
+
+class PostgresAnalysisArtifactStore(AnalysisArtifactStore):
+    """Persist versioned analysis artifacts in the postgres database."""
+
+    def __init__(self, conn: _AsyncpgConnectionLike) -> None:
+        self._table = _PostgresTable(
+            conn,
+            table="analysis_artifacts",
+            columns=_ANALYSIS_ARTIFACT_COLUMNS,
+            kind="AnalysisArtifact",
+        )
+
+    async def get(self, entity_id: UUID) -> AnalysisArtifact | None:
+        row = await self._table.get(str(entity_id))
+        return analysis_artifact_from_dict(_decode_payload(row)) if row is not None else None
+
+    async def add(self, entity: AnalysisArtifact) -> None:
+        await self._table.add(str(entity.id), _encode_payload(analysis_artifact_to_dict(entity)))
+
+    async def update(self, entity: AnalysisArtifact) -> None:
+        await self._table.update(str(entity.id), _encode_payload(analysis_artifact_to_dict(entity)))
+
+    async def delete(self, entity_id: UUID) -> None:
+        await self._table.delete(str(entity_id))
+
+    async def list(self) -> builtins.list[AnalysisArtifact]:
+        rows = await self._table.list_all()
+        return [analysis_artifact_from_dict(_decode_payload(r)) for r in rows]
+
+    async def list_by_analysis_run(self, analysis_run_id: UUID) -> builtins.list[AnalysisArtifact]:
+        rows = await self._table.list_where("analysis_run_id", str(analysis_run_id))
+        return [analysis_artifact_from_dict(_decode_payload(r)) for r in rows]
+
+    async def list_by_repository(self, repository_id: UUID) -> builtins.list[AnalysisArtifact]:
+        rows = await self._table.list_where("repository_id", str(repository_id))
+        return [analysis_artifact_from_dict(_decode_payload(r)) for r in rows]
+
+    async def list_by_type(
+        self, analysis_run_id: UUID, artifact_type: str
+    ) -> builtins.list[AnalysisArtifact]:
+        rows = await self._table.list_where("analysis_run_id", str(analysis_run_id))
+        return [
+            analysis_artifact_from_dict(_decode_payload(r))
+            for r in rows
+            if r["artifact_type"] == artifact_type
+        ]

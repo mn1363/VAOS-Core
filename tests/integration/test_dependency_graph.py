@@ -146,13 +146,21 @@ _EXPECTED_STEP_NAMES = (
     "extract_architecture",
     "extract_interfaces",
     "extract_foundation",
+    "analyze_architecture",
+    "analyze_complexity",
+    "analyze_dependencies",
+    "analyze_documentation",
+    "analyze_metrics",
+    "analyze_quality",
+    "analyze_security",
+    "analyze_tests",
     "build_architecture_graph",
     "build_dependency_graph",
 )
 
 
 async def _run_analysis(source_repo: Path, tmp_path: Path, tag: str) -> PipelineResult:
-    """Run the real, unmodified 16-step composition and return its `PipelineResult`.
+    """Run the real, unmodified 24-step composition and return its `PipelineResult`.
 
     Each `tag` gets its own storage and workspace roots, so repeated runs are fully independent.
     """
@@ -195,17 +203,18 @@ def _edge_triples(graph: DependencyGraph) -> set[tuple[str, str, int]]:
 async def test_composition_ends_with_the_dependency_graph_step_and_exposes_real_import_results(
     tmp_path: Path,
 ) -> None:
-    """The composition has 16 steps, ending in `build_dependency_graph`, and yields real results;
+    """The composition has 24 steps, ending in `build_dependency_graph`, and yields real results;
     the `dependency_graph` it writes is exactly the builder's output for its own `import_results`.
     """
     _skip_without_git()
     source_repo = _make_source_repository(tmp_path)
     result = await _run_analysis(source_repo, tmp_path, "a")
 
-    assert len(result.step_names()) == 16
+    assert len(result.step_names()) == 24
     assert result.step_names()[-1] == "build_dependency_graph"
-    assert [name for name in result.step_names() if "dependency" in name] == [
-        "build_dependency_graph"
+    assert [name for name in result.step_names() if "depend" in name] == [
+        "analyze_dependencies",
+        "build_dependency_graph",
     ]
 
     import_results = result.context.require("import_results")

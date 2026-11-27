@@ -14,7 +14,10 @@ a missing id, and `delete` is a no-op on a missing id -- see `storage.base.Entit
 for why this split exists.
 """
 
+from __future__ import annotations
+
 import asyncio
+import builtins
 import json
 import os
 import tempfile
@@ -24,8 +27,9 @@ from uuid import UUID
 
 from src.core.logging import get_logger
 from src.core.utils import ensure_directory
-from src.domain.entities import AnalysisRun, Finding, SourceFile, SourceRepository
+from src.domain.entities import AnalysisArtifact, AnalysisRun, Finding, SourceFile, SourceRepository
 from src.domain.interfaces import (
+    AnalysisArtifactStore,
     AnalysisRunRepository,
     FindingRepository,
     SourceFileRepository,
@@ -36,6 +40,8 @@ from ..base import (
     EntityNotFoundError,
     StorageError,
     StorageIntegrityError,
+    analysis_artifact_from_dict,
+    analysis_artifact_to_dict,
     analysis_run_from_dict,
     analysis_run_to_dict,
     finding_from_dict,
@@ -526,3 +532,52 @@ class FilesystemFindingRepository(FindingRepository):
             Every persisted `Finding`.
         """
         return [finding_from_dict(r) for r in await self._collection.list_all()]
+
+
+class FilesystemAnalysisArtifactStore(AnalysisArtifactStore):
+    """Persist analysis artifacts in an atomic JSON collection."""
+
+    def __init__(self, root: Path) -> None:
+        self._collection = _JsonCollectionStore(
+            root / "analysis_artifacts.json", kind="AnalysisArtifact"
+        )
+
+    async def get(self, entity_id: UUID) -> AnalysisArtifact | None:
+        record = await self._collection.get(str(entity_id))
+        return analysis_artifact_from_dict(record) if record is not None else None
+
+    async def add(self, entity: AnalysisArtifact) -> None:
+        await self._collection.add(str(entity.id), analysis_artifact_to_dict(entity))
+
+    async def update(self, entity: AnalysisArtifact) -> None:
+        await self._collection.update(str(entity.id), analysis_artifact_to_dict(entity))
+
+    async def delete(self, entity_id: UUID) -> None:
+        await self._collection.delete(str(entity_id))
+
+    async def list(self) -> builtins.list[AnalysisArtifact]:
+        return [analysis_artifact_from_dict(r) for r in await self._collection.list_all()]
+
+    async def list_by_analysis_run(self, analysis_run_id: UUID) -> builtins.list[AnalysisArtifact]:
+        return [
+            analysis_artifact_from_dict(r)
+            for r in await self._collection.list_all()
+            if r["analysis_run_id"] == str(analysis_run_id)
+        ]
+
+    async def list_by_repository(self, repository_id: UUID) -> builtins.list[AnalysisArtifact]:
+        return [
+            analysis_artifact_from_dict(r)
+            for r in await self._collection.list_all()
+            if r["repository_id"] == str(repository_id)
+        ]
+
+    async def list_by_type(
+        self, analysis_run_id: UUID, artifact_type: str
+    ) -> builtins.list[AnalysisArtifact]:
+        return [
+            analysis_artifact_from_dict(r)
+            for r in await self._collection.list_all()
+            if r["analysis_run_id"] == str(analysis_run_id)
+            and r["artifact_type"] == artifact_type
+        ]

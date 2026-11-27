@@ -27,10 +27,15 @@ from src.bootstrap.analysis_steps import (
 )
 from src.bootstrap.wiring import bootstrap, build_repository_client, build_workspace_manager
 from src.core.config import AppConfig
+from src.domain.entities import AnalysisRunStatus
 from src.extractors.interfaces.base import InterfaceOrigin
 from src.graph.architecture.base import ArchitectureGraph
 from src.graph.dependency.base import DependencyGraph, DependencyNodeKind
 from src.graph.dependency.structural import StructuralDependencyGraphBuilder
+from src.storage.filesystem.driver import (
+    FilesystemAnalysisArtifactStore,
+    FilesystemAnalysisRunRepository,
+)
 
 
 def _config(raw: dict[str, object]) -> AppConfig:
@@ -136,6 +141,14 @@ async def test_real_repository_analysis_executes_against_one_real_local_reposito
         "extract_architecture",
         "extract_interfaces",
         "extract_foundation",
+        "analyze_architecture",
+        "analyze_complexity",
+        "analyze_dependencies",
+        "analyze_documentation",
+        "analyze_metrics",
+        "analyze_quality",
+        "analyze_security",
+        "analyze_tests",
         "build_architecture_graph",
         "build_dependency_graph",
     )
@@ -229,7 +242,7 @@ async def test_real_repository_analysis_produces_the_dependency_graph(tmp_path: 
     result = await bootstrap(config, extra_steps=build_analysis_steps(config))
 
     # the dependency graph step is the one new step, appended after the architecture graph step.
-    assert result.step_count == 16
+    assert result.step_count == 24
     assert result.step_names()[-2:] == ("build_architecture_graph", "build_dependency_graph")
 
     # every earlier graph and extraction key is still available alongside the new one.
@@ -245,11 +258,37 @@ async def test_real_repository_analysis_produces_the_dependency_graph(tmp_path: 
         "architecture_results",
         "interface_results",
         "foundation_results",
+        "architecture_analysis_results",
+        "complexity_analysis_results",
+        "dependency_analysis_results",
+        "documentation_analysis_results",
+        "metrics_analysis_results",
+        "quality_analysis_results",
+        "security_analysis_results",
+        "tests_analysis_results",
         "architecture_graph",
         "dependency_graph",
     ):
         assert result.context.has(key), key
     assert isinstance(result.context.require("architecture_graph"), ArchitectureGraph)
+    successful_parse_results = result.context.require("successful_parse_results")
+
+    for key in (
+        "architecture_analysis_results",
+        "complexity_analysis_results",
+        "dependency_analysis_results",
+        "documentation_analysis_results",
+        "metrics_analysis_results",
+        "quality_analysis_results",
+        "security_analysis_results",
+        "tests_analysis_results",
+    ):
+        analysis_results = result.context.require(key)
+        assert len(analysis_results) == len(successful_parse_results)
+        assert all(item.result.succeeded for item in analysis_results)
+        assert {item.repository_id for item in analysis_results} == {
+            repository.id for repository in result.context.require("repositories")
+        }
 
     # a valid DependencyGraph (its own `__post_init__` validation already ran on construction).
     dependency_graph = result.context.require("dependency_graph")
@@ -378,6 +417,20 @@ async def test_multiple_local_repositories_are_analyzed_independently(
     assert {file.relative_path for file in files} == {"a.py", "b.py"}
     assert {file.repository_id for file in files} == {repo.id for repo in repositories}
     assert {item.repository_id for item in parse_results} == {repo.id for repo in repositories}
+    for key in (
+        "architecture_analysis_results",
+        "complexity_analysis_results",
+        "dependency_analysis_results",
+        "documentation_analysis_results",
+        "metrics_analysis_results",
+        "quality_analysis_results",
+        "security_analysis_results",
+        "tests_analysis_results",
+    ):
+        analysis_results = result.context.require(key)
+        assert {item.repository_id for item in analysis_results} == {
+            repo.id for repo in repositories
+        }
     assert len(architecture_graphs) == 2
     assert len(dependency_graphs) == 2
     assert {item.repository_id for item in architecture_graphs} == {
@@ -452,3 +505,79 @@ async def test_clone_repository_func_matches_reference_flow_shape(tmp_path: Path
     promoted_clone = _clone_repository_func(repository_client, workspace_manager)
     assert callable(promoted_clone)
     assert promoted_clone.__code__.co_argcount == 1
+
+
+@pytest.mark.asyncio
+async def test_real_repository_analysis_persists_artifacts_and_completes_run(
+    tmp_path: Path,
+) -> None:
+    """The real pipeline stores each analyzer result and completes its AnalysisRun."""
+    if shutil.which("git") is None:
+        pytest.skip("git executable not found on PATH")
+
+    source_repo = tmp_path / "source_repo"
+    source_repo.mkdir()
+    _run_git("init", cwd=source_repo)
+    _run_git("config", "user.email", "test@example.com", cwd=source_repo)
+    _run_git("config", "user.name", "Test", cwd=source_repo)
+    _run_git("checkout", "-b", "main", cwd=source_repo)
+    _write_fixture_repository(source_repo)
+
+    storage_root = tmp_path / "storage"
+    config = _config(
+        {
+            "collectors": {"backend": "filesystem", "source": str(source_repo)},
+            "storage": {
+                "backend": "filesystem",
+                "filesystem": {"root": str(storage_root)},
+            },
+            "repository": {"workspace_root": str(tmp_path / "workspaces")},
+        }
+    )
+
+    result = await bootstrap(
+        config,
+        extra_steps=build_analysis_steps(config),
+        persist_analysis_artifacts=True,
+    )
+
+    repositories = result.context.require("repositories")
+    run_ids = result.context.require("analysis_run_ids")
+    artifacts = await FilesystemAnalysisArtifactStore(storage_root).list()
+    runs = await FilesystemAnalysisRunRepository(storage_root).list()
+
+    assert len(repositories) == 1
+    repository = repositories[0]
+    assert set(run_ids) == {repository.id}
+    assert len(runs) == 1
+    assert runs[0].id == run_ids[repository.id]
+    assert runs[0].status is AnalysisRunStatus.COMPLETED
+    assert len(artifacts) == sum(
+        len(result.context.require(key))
+        for key in (
+            "architecture_analysis_results",
+            "complexity_analysis_results",
+            "dependency_analysis_results",
+            "documentation_analysis_results",
+            "metrics_analysis_results",
+            "quality_analysis_results",
+            "security_analysis_results",
+            "tests_analysis_results",
+        )
+    )
+    assert artifacts
+    assert {artifact.repository_id for artifact in artifacts} == {repository.id}
+    assert {artifact.analysis_run_id for artifact in artifacts} == {runs[0].id}
+    assert set(result.context.require("persisted_analysis_artifact_ids")) == {
+        artifact.id for artifact in artifacts
+    }
+    assert {artifact.artifact_type for artifact in artifacts} == {
+        "architecture.analysis",
+        "complexity.analysis",
+        "dependency.analysis",
+        "documentation.analysis",
+        "metrics.analysis",
+        "quality.analysis",
+        "security.analysis",
+        "tests.analysis",
+    }

@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from src.domain.entities import (
+    AnalysisArtifact,
     AnalysisRun,
     AnalysisRunStatus,
     Finding,
@@ -71,6 +72,8 @@ def make_analysis_run(**overrides: object) -> AnalysisRun:
         "started_at": CREATED_AT,
         "completed_at": None,
         "error_message": None,
+        "retry_of_id": None,
+        "attempt_number": 1,
     }
     fields.update(overrides)
     return AnalysisRun(**fields)  # type: ignore[arg-type]
@@ -92,3 +95,22 @@ def make_finding(**overrides: object) -> Finding:
     }
     fields.update(overrides)
     return Finding(**fields)  # type: ignore[arg-type]
+
+
+
+def make_analysis_artifact(**overrides: object) -> AnalysisArtifact:
+    """Build a fully-populated AnalysisArtifact for storage adapter tests."""
+    fields: dict[str, object] = {
+        "id": UUID("55555555-5555-5555-5555-555555555555"),
+        "created_at": CREATED_AT,
+        "updated_at": UPDATED_AT,
+        "analysis_run_id": RUN_ID,
+        "repository_id": REPOSITORY_ID,
+        "artifact_type": "structural_graph",
+        "producer": "structural_analyzer",
+        "schema_version": 2,
+        "source_file_id": FILE_ID,
+        "payload": {"nodes": [{"id": "root"}], "count": 1},
+    }
+    fields.update(overrides)
+    return AnalysisArtifact(**fields)  # type: ignore[arg-type]

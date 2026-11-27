@@ -4,7 +4,7 @@ Proves that the concrete builder consumes the real `symbol_results`, `interface_
 `foundation_results`, and `architecture_graph` produced by the real-repository analysis
 composition (`bootstrap(config, extra_steps=build_analysis_steps(config))`) and assembles them
 into a valid, deterministic `KnowledgeGraph`. The builder is invoked directly on those context
-values; it is not a pipeline step, so the composition still has exactly its 16 steps and writes no
+values; it is not a pipeline step, so the composition still has exactly its 24 steps and writes no
 knowledge graph. `pattern_results` stays `()` here because no concrete Pattern Extractor exists
 yet -- non-empty pattern mapping is covered at unit level.
 
@@ -182,6 +182,14 @@ _EXPECTED_STEP_NAMES = (
     "extract_architecture",
     "extract_interfaces",
     "extract_foundation",
+    "analyze_architecture",
+    "analyze_complexity",
+    "analyze_dependencies",
+    "analyze_documentation",
+    "analyze_metrics",
+    "analyze_quality",
+    "analyze_security",
+    "analyze_tests",
     "build_architecture_graph",
     "build_dependency_graph",
 )
@@ -199,7 +207,7 @@ class _RealResults:
 
 
 async def _run_analysis(source_repo: Path, tmp_path: Path, tag: str) -> PipelineResult:
-    """Run the real 16-step composition and return its `PipelineResult`.
+    """Run the real 24-step composition and return its `PipelineResult`.
 
     Each `tag` gets its own storage and workspace roots, so repeated runs are fully independent.
     """
@@ -652,5 +660,5 @@ async def test_builder_without_architecture_graph_omits_packages_on_real_results
     } == {n.identifier for n in without_packages.nodes}
     # The builder is not a pipeline step: the composition itself still writes no knowledge graph.
     result = await _run_analysis(source_repo, tmp_path, "c")
-    assert len(result.step_names()) == 16
+    assert len(result.step_names()) == 24
     assert not any("knowledge" in name for name in result.step_names())

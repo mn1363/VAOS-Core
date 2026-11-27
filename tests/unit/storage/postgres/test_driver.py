@@ -31,6 +31,7 @@ from src.storage.postgres.driver import (
     _FINDING_COLUMNS,
     _SOURCE_FILE_COLUMNS,
     _SOURCE_REPOSITORY_COLUMNS,
+    PostgresAnalysisArtifactStore,
     PostgresAnalysisRunRepository,
     PostgresFindingRepository,
     PostgresSourceFileRepository,
@@ -38,6 +39,7 @@ from src.storage.postgres.driver import (
 )
 
 from tests.unit.storage._fixtures import (
+    make_analysis_artifact,
     make_analysis_run,
     make_finding,
     make_source_file,
@@ -66,6 +68,7 @@ class FakeAsyncpgConnection:
             "source_files": {},
             "analysis_runs": {},
             "findings": {},
+            "analysis_artifacts": {},
         }
         self._unique_columns: dict[str, tuple[str, ...]] = {"source_repositories": ("source_uri",)}
 
@@ -419,6 +422,8 @@ def test_declared_columns_match_across_every_entity_type() -> None:
         "started_at",
         "completed_at",
         "error_message",
+        "retry_of_id",
+        "attempt_number",
         "created_at",
         "updated_at",
     }
@@ -434,3 +439,33 @@ def test_declared_columns_match_across_every_entity_type() -> None:
         "created_at",
         "updated_at",
     }
+
+
+@pytest.mark.asyncio
+async def test_analysis_artifact_store_round_trip_and_scoped_queries(
+    conn: FakeAsyncpgConnection,
+) -> None:
+    store = PostgresAnalysisArtifactStore(conn)
+    artifact = make_analysis_artifact()
+    other_run = make_analysis_artifact(
+        id=uuid4(), analysis_run_id=uuid4(), artifact_type="summary", source_file_id=None
+    )
+    other_repo = make_analysis_artifact(
+        id=uuid4(), repository_id=uuid4(), analysis_run_id=uuid4()
+    )
+    await store.add(artifact)
+    await store.add(other_run)
+    await store.add(other_repo)
+
+    fetched = await store.get(artifact.id)
+    assert fetched == artifact
+    assert [item.id for item in await store.list_by_analysis_run(artifact.analysis_run_id)] == [artifact.id]
+    assert {item.id for item in await store.list_by_repository(artifact.repository_id)} == {artifact.id, other_run.id}
+    assert [item.id for item in await store.list_by_type(artifact.analysis_run_id, "structural_graph")] == [artifact.id]
+    assert (await store.get(other_run.id)).source_file_id is None  # type: ignore[union-attr]
+
+    artifact.payload["count"] = 9
+    await store.update(artifact)
+    assert (await store.get(artifact.id)).payload["count"] == 9  # type: ignore[union-attr]
+    await store.delete(artifact.id)
+    assert await store.get(artifact.id) is None

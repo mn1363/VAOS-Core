@@ -2,7 +2,9 @@
 parse -> extract, promoted from the Reference Flow's own test-local composition (see
 `tests/integration/test_reference_flow.py`, "frozen as a milestone") into `src/bootstrap`.
 
-`build_analysis_steps` is this module's entire public surface: one function returning the thirteen
+`build_analysis_steps` constructs the repository-analysis steps. The two persistence-step builders
+provide optional storage integration for the outer `bootstrap` composition. The analysis steps
+remain independently constructible and testable.
 additional `Step`s a caller appends via `bootstrap.wiring.bootstrap`/`build_application`'s own
 `extra_steps` parameter -- the only attachment point this module uses. It does not construct a
 `Pipeline` itself, does not call `Pipeline.run`, and does not modify `wiring.py`'s own three-step
@@ -37,15 +39,43 @@ tried in a fixed order.
 
 from __future__ import annotations
 
+import json
 import os
-from collections.abc import Awaitable, Callable, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from dataclasses import asdict, dataclass, is_dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
 from uuid import UUID
 
+from src.analyzers.architecture.base import ArchitectureAnalysisResult
+from src.analyzers.complexity.base import ComplexityAnalysisResult
+from src.analyzers.dependency.base import DependencyAnalysisResult
+from src.analyzers.documentation.base import DocumentationAnalysisResult
+from src.analyzers.metrics.base import MetricsAnalysisResult
+from src.analyzers.quality.base import QualityAnalysisResult
+from src.analyzers.security.base import SecurityAnalysisResult
+from src.analyzers.structural import (
+    StructuralArchitectureAnalyzer,
+    StructuralComplexityAnalyzer,
+    StructuralDependencyAnalyzer,
+    StructuralDocumentationAnalyzer,
+    StructuralMetricsAnalyzer,
+    StructuralQualityAnalyzer,
+    StructuralSecurityAnalyzer,
+    StructuralTestsAnalyzer,
+    analyze_repository_result,
+)
+from src.analyzers.tests.base import TestsAnalysisResult
 from src.core.config import AppConfig
-from src.domain.entities import SourceLanguage, SourceRepository
+from src.domain.entities import (
+    AnalysisArtifact,
+    AnalysisRun,
+    AnalysisRunStatus,
+    SourceLanguage,
+    SourceRepository,
+)
+from src.domain.interfaces import AnalysisArtifactStore, AnalysisRunRepository
 from src.extractors.architecture.structural import StructuralArchitectureExtractor
 from src.extractors.ast.structural import StructuralAstExtractor
 from src.extractors.foundation.structural import StructuralFoundationExtractor
@@ -61,10 +91,15 @@ from src.parsers.python.parser import PythonParser
 from src.parsers.rust.parser import RustParser
 from src.parsers.typescript.parser import TypeScriptParser
 from src.pipeline.base import Step
+from src.pipeline.context import PipelineContext
 from src.pipeline.steps import CallableStep, MapStep
 from src.repository.base import RepositoryClient, WorkspaceManager
 
 from .wiring import build_repository_client, build_workspace_manager
+
+
+class _HasRelativePath(Protocol):
+    relative_path: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +269,25 @@ def _extract_repository_result_func[ResultT](
     return _extract
 
 
+def _analyze_repository_result_func[ExtractionT, AnalysisT](
+    analyzer: Callable[[ExtractionT], AnalysisT],
+    failed: Callable[..., AnalysisT],
+) -> Callable[[RepositoryScoped[ExtractionT]], RepositoryScoped[AnalysisT]]:
+    """Adapt a per-file analyzer while retaining repository identity and local failures."""
+
+    def _analyze(
+        item: RepositoryScoped[ExtractionT],
+    ) -> RepositoryScoped[AnalysisT]:
+        return RepositoryScoped(
+            repository_id=item.repository_id,
+            result=analyze_repository_result(
+                item.result, cast(_HasRelativePath, item.result).relative_path, analyzer, failed
+            ),
+        )
+
+    return _analyze
+
+
 def _build_repository_graphs[ResultT](
     repositories: tuple[SourceRepository, ...],
     extraction_results: tuple[RepositoryScoped[ResultT], ...],
@@ -337,14 +391,76 @@ def _select_successful_parse_results(
     return tuple(result for result in parse_results if result.succeeded)
 
 
+def _json_default(value: object) -> object:
+    """Convert supported domain values to stable JSON primitives."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (UUID, Path)):
+        return str(value)
+    raise TypeError(f"unsupported analysis artifact value: {type(value).__name__}")
+
+
+def _persist_analysis_artifacts_func(
+    store: AnalysisArtifactStore,
+) -> Callable[..., Awaitable[tuple[UUID, ...]]]:
+    """Bind the artifact store into the final persistence step."""
+    artifact_sources = (
+        ("architecture_analysis_results", "architecture.analysis", "StructuralArchitectureAnalyzer"),
+        ("complexity_analysis_results", "complexity.analysis", "StructuralComplexityAnalyzer"),
+        ("dependency_analysis_results", "dependency.analysis", "StructuralDependencyAnalyzer"),
+        ("documentation_analysis_results", "documentation.analysis", "StructuralDocumentationAnalyzer"),
+        ("metrics_analysis_results", "metrics.analysis", "StructuralMetricsAnalyzer"),
+        ("quality_analysis_results", "quality.analysis", "StructuralQualityAnalyzer"),
+        ("security_analysis_results", "security.analysis", "StructuralSecurityAnalyzer"),
+        ("tests_analysis_results", "tests.analysis", "StructuralTestsAnalyzer"),
+    )
+
+    async def _persist(
+        analysis_run_ids: Mapping[UUID, UUID], *result_groups: Sequence[RepositoryScoped[Any]]
+    ) -> tuple[UUID, ...]:
+        persisted: list[UUID] = []
+        for group, (_, artifact_type, producer) in zip(
+            result_groups, artifact_sources, strict=True
+        ):
+            for scoped_result in group:
+                analysis_run_id = analysis_run_ids.get(scoped_result.repository_id)
+                if analysis_run_id is None:
+                    raise ValueError(
+                        "missing AnalysisRun ID for repository "
+                        f"{scoped_result.repository_id}"
+                    )
+                result = scoped_result.result
+                if not is_dataclass(result):
+                    raise TypeError(
+                        f"{producer} result must be a dataclass, got {type(result).__name__}"
+                    )
+                payload = json.loads(
+                    json.dumps(asdict(cast(Any, result)), default=_json_default, allow_nan=False)
+                )
+                artifact = AnalysisArtifact(
+                    analysis_run_id=analysis_run_id,
+                    repository_id=scoped_result.repository_id,
+                    artifact_type=artifact_type,
+                    producer=producer,
+                    payload=payload,
+                )
+                await store.add(artifact)
+                persisted.append(artifact.id)
+        return tuple(persisted)
+
+    return _persist
+
+
 def build_analysis_steps(config: AppConfig) -> list[Step]:
-    """Construct the thirteen additional `Step`s real-repository analysis composition needs.
+    """Construct the twenty-one `Step`s for real-repository analysis.
 
     Every Port this milestone needs is constructed here from already-existing, already-frozen
     builders -- `wiring.build_repository_client`/`build_workspace_manager` -- or from direct
     construction of already-frozen, concrete classes (the five parsers, the six extractors); none
     is looked up through a registry or service locator. The returned steps are meant to be passed
-    straight through as `bootstrap(config, extra_steps=build_analysis_steps(config))`; this
+    straight through as `bootstrap(config, extra_steps=build_analysis_steps(config))`. Add
+    `persist_analysis_artifacts=True` to `bootstrap` to create run records and persist analyzer
+    outputs through the selected storage backend. This
     function never constructs a `Pipeline` and never calls `Pipeline.run` itself.
 
     Args:
@@ -353,7 +469,7 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
             `build_application` already does for its own three default steps.
 
     Returns:
-        The thirteen new `Step`s, in the fixed order: `require_single_repository`,
+        The twenty-one new `Step`s, in the fixed order: `require_single_repository`,
         `clone_repositories`, `enumerate_files`, `parse_files`, `select_successful_parse_results`,
         `extract_imports`, `extract_ast`, `extract_symbols`, `extract_architecture`,
         `extract_interfaces`, `extract_foundation`, `build_architecture_graph`,
@@ -365,6 +481,14 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
     repository_client = build_repository_client(config)
     workspace_manager = build_workspace_manager(config)
     parsers = _all_parsers()
+    architecture_analyzer = StructuralArchitectureAnalyzer()
+    complexity_analyzer = StructuralComplexityAnalyzer()
+    dependency_analyzer = StructuralDependencyAnalyzer()
+    documentation_analyzer = StructuralDocumentationAnalyzer()
+    metrics_analyzer = StructuralMetricsAnalyzer()
+    quality_analyzer = StructuralQualityAnalyzer()
+    security_analyzer = StructuralSecurityAnalyzer()
+    tests_analyzer = StructuralTestsAnalyzer()
 
     require_single_repository_step: Step = CallableStep(
         "require_single_repository",
@@ -433,6 +557,62 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
         input_key="successful_parse_results",
         output_key="foundation_results",
     )
+    analyze_architecture_step: Step = MapStep(
+        "analyze_architecture",
+        _analyze_repository_result_func(
+            architecture_analyzer.analyze, ArchitectureAnalysisResult.failed
+        ),
+        input_key="architecture_results",
+        output_key="architecture_analysis_results",
+    )
+    analyze_complexity_step: Step = MapStep(
+        "analyze_complexity",
+        _analyze_repository_result_func(
+            complexity_analyzer.analyze, ComplexityAnalysisResult.failed
+        ),
+        input_key="ast_results",
+        output_key="complexity_analysis_results",
+    )
+    analyze_dependencies_step: Step = MapStep(
+        "analyze_dependencies",
+        _analyze_repository_result_func(
+            dependency_analyzer.analyze, DependencyAnalysisResult.failed
+        ),
+        input_key="import_results",
+        output_key="dependency_analysis_results",
+    )
+    analyze_documentation_step: Step = MapStep(
+        "analyze_documentation",
+        _analyze_repository_result_func(
+            documentation_analyzer.analyze, DocumentationAnalysisResult.failed
+        ),
+        input_key="ast_results",
+        output_key="documentation_analysis_results",
+    )
+    analyze_metrics_step: Step = MapStep(
+        "analyze_metrics",
+        _analyze_repository_result_func(metrics_analyzer.analyze, MetricsAnalysisResult.failed),
+        input_key="ast_results",
+        output_key="metrics_analysis_results",
+    )
+    analyze_quality_step: Step = MapStep(
+        "analyze_quality",
+        _analyze_repository_result_func(quality_analyzer.analyze, QualityAnalysisResult.failed),
+        input_key="foundation_results",
+        output_key="quality_analysis_results",
+    )
+    analyze_security_step: Step = MapStep(
+        "analyze_security",
+        _analyze_repository_result_func(security_analyzer.analyze, SecurityAnalysisResult.failed),
+        input_key="import_results",
+        output_key="security_analysis_results",
+    )
+    analyze_tests_step: Step = MapStep(
+        "analyze_tests",
+        _analyze_repository_result_func(tests_analyzer.analyze, TestsAnalysisResult.failed),
+        input_key="symbol_results",
+        output_key="tests_analysis_results",
+    )
     build_architecture_graph_step: Step = CallableStep(
         "build_architecture_graph",
         lambda repositories, results: _build_repository_graphs(
@@ -450,7 +630,7 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
         output_key="dependency_graph",
     )
 
-    return [
+    steps: list[Step] = [
         require_single_repository_step,
         clone_step,
         enumerate_step,
@@ -462,6 +642,90 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
         extract_architecture_step,
         extract_interfaces_step,
         extract_foundation_step,
+        analyze_architecture_step,
+        analyze_complexity_step,
+        analyze_dependencies_step,
+        analyze_documentation_step,
+        analyze_metrics_step,
+        analyze_quality_step,
+        analyze_security_step,
+        analyze_tests_step,
         build_architecture_graph_step,
         build_dependency_graph_step,
     ]
+    return steps
+
+
+class _AnalysisRunCreationStep(Step):
+    """Create new runs or explicit retry attempts for selected repositories."""
+
+    def __init__(self, store: AnalysisRunRepository) -> None:
+        self._store = store
+
+    @property
+    def name(self) -> str:
+        return "create_analysis_runs"
+
+    async def execute(self, context: PipelineContext) -> PipelineContext:
+        repositories: Sequence[SourceRepository] = context.require("repositories")
+        retry_of_ids: Mapping[UUID, UUID] = context.get("retry_of_ids", {})
+        run_ids: dict[UUID, UUID] = {}
+        for repository in repositories:
+            prior_id = retry_of_ids.get(repository.id)
+            if prior_id is None:
+                run = AnalysisRun(repository_id=repository.id)
+            else:
+                prior = await self._store.get(prior_id)
+                if prior is None:
+                    raise ValueError(f"retry source AnalysisRun {prior_id} does not exist")
+                if prior.repository_id != repository.id:
+                    raise ValueError("retry source AnalysisRun belongs to another repository")
+                if prior.status is not AnalysisRunStatus.FAILED:
+                    raise ValueError("only failed AnalysisRuns can be retried")
+                run = prior.create_retry()
+            run.start()
+            await self._store.add(run)
+            run_ids[repository.id] = run.id
+        context.set("analysis_run_ids", run_ids)
+        return context
+
+
+def build_analysis_run_creation_step(store: AnalysisRunRepository) -> Step:
+    """Build run creation with optional ``retry_of_ids`` context mapping."""
+    return _AnalysisRunCreationStep(store)
+
+
+def build_analysis_artifact_persistence_step(
+    store: AnalysisArtifactStore, run_store: AnalysisRunRepository
+) -> Step:
+    """Build the final persistence step and complete its successful analysis runs."""
+    persist = _persist_analysis_artifacts_func(store)
+
+    async def _persist_and_complete(
+        analysis_run_ids: Mapping[UUID, UUID], *result_groups: Sequence[RepositoryScoped[Any]]
+    ) -> tuple[UUID, ...]:
+        artifact_ids = await persist(analysis_run_ids, *result_groups)
+        for run_id in analysis_run_ids.values():
+            run = await run_store.get(run_id)
+            if run is not None:
+                run.complete()
+                await run_store.update(run)
+        return artifact_ids
+
+    return CallableStep(
+        "persist_analysis_artifacts",
+        _persist_and_complete,
+        input_keys=(
+            "analysis_run_ids",
+            "architecture_analysis_results",
+            "complexity_analysis_results",
+            "dependency_analysis_results",
+            "documentation_analysis_results",
+            "metrics_analysis_results",
+            "quality_analysis_results",
+            "security_analysis_results",
+            "tests_analysis_results",
+        ),
+        output_key="persisted_analysis_artifact_ids",
+        is_async=True,
+    )

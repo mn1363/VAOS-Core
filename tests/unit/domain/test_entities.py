@@ -6,6 +6,7 @@ from uuid import UUID, uuid4
 import pytest
 from src.core.exceptions import ValidationError
 from src.domain.entities import (
+    AnalysisArtifact,
     AnalysisRun,
     AnalysisRunStatus,
     Entity,
@@ -285,6 +286,44 @@ def test_finding_rejects_blank_message() -> None:
         Finding(analysis_run_id=uuid4(), category="quality", message=" ")
 
 
+# --- AnalysisArtifact ---
+
+
+def test_analysis_artifact_defaults_and_retains_repository_scope() -> None:
+    artifact = AnalysisArtifact(
+        analysis_run_id=uuid4(),
+        repository_id=uuid4(),
+        artifact_type="complexity.summary",
+        producer="complexity",
+        payload={"functions": 3, "scores": [1, 2]},
+    )
+
+    assert artifact.schema_version == 1
+    assert artifact.source_file_id is None
+    assert artifact.payload == {"functions": 3, "scores": [1, 2]}
+
+
+def test_analysis_artifact_rejects_invalid_contract_metadata() -> None:
+    with pytest.raises(ValidationError, match="artifact_type"):
+        AnalysisArtifact(
+            analysis_run_id=uuid4(), repository_id=uuid4(), artifact_type=" ",
+            producer="metrics", payload={},
+        )
+    with pytest.raises(ValidationError, match="schema_version"):
+        AnalysisArtifact(
+            analysis_run_id=uuid4(), repository_id=uuid4(), artifact_type="metrics",
+            producer="metrics", payload={}, schema_version=0,
+        )
+
+
+def test_analysis_artifact_rejects_non_json_payload_values() -> None:
+    with pytest.raises(ValidationError, match="JSON-compatible"):
+        AnalysisArtifact(
+            analysis_run_id=uuid4(), repository_id=uuid4(), artifact_type="metrics",
+            producer="metrics", payload={"unsupported": object()},
+        )
+
+
 # --- Enums ---
 
 
@@ -319,3 +358,31 @@ def test_analysis_run_status_and_finding_severity_have_expected_members() -> Non
         "cancelled",
     }
     assert {s.value for s in FindingSeverity} == {"info", "low", "medium", "high", "critical"}
+
+
+# --- AnalysisRun retry lineage ---
+
+
+def test_failed_analysis_run_creates_a_new_retry_attempt() -> None:
+    failed = AnalysisRun(repository_id=uuid4())
+    failed.start()
+    failed.fail("analyzer crashed")
+    retry = failed.create_retry()
+    assert retry.id != failed.id
+    assert retry.repository_id == failed.repository_id
+    assert retry.retry_of_id == failed.id
+    assert retry.attempt_number == 2
+    assert retry.status is AnalysisRunStatus.PENDING
+    assert failed.status is AnalysisRunStatus.FAILED
+    assert failed.error_message == "analyzer crashed"
+
+
+def test_analysis_run_retry_is_only_allowed_after_failure() -> None:
+    run = AnalysisRun(repository_id=uuid4())
+    with pytest.raises(ValidationError, match="only failed"):
+        run.create_retry()
+
+
+def test_analysis_run_rejects_invalid_attempt_number() -> None:
+    with pytest.raises(ValidationError, match="attempt_number"):
+        AnalysisRun(repository_id=uuid4(), attempt_number=0)

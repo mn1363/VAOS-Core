@@ -265,6 +265,24 @@ class AnalysisRun(Entity):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     error_message: str | None = None
+    retry_of_id: UUID | None = None
+    attempt_number: int = 1
+
+    def __post_init__(self) -> None:
+        if self.attempt_number < 1:
+            raise ValidationError("analysis run attempt_number must be at least 1")
+        if self.retry_of_id == self.id:
+            raise ValidationError("an analysis run cannot retry itself")
+
+    def create_retry(self) -> "AnalysisRun":
+        """Create a fresh run linked to this failed run; retain all prior records."""
+        if self.status is not AnalysisRunStatus.FAILED:
+            raise ValidationError("only failed analysis runs can be retried")
+        return AnalysisRun(
+            repository_id=self.repository_id,
+            retry_of_id=self.id,
+            attempt_number=self.attempt_number + 1,
+        )
 
     def start(self) -> None:
         """Transition from PENDING to RUNNING.
@@ -385,3 +403,42 @@ class Finding(Entity):
             raise ValidationError("Finding.category must not be empty")
         if not self.message.strip():
             raise ValidationError("Finding.message must not be empty")
+
+
+@dataclass(eq=False, kw_only=True)
+class AnalysisArtifact(Entity):
+    """A versioned, repository-scoped result produced by one analysis run.
+
+    `artifact_type` identifies the payload contract (for example,
+    `complexity.summary` or `architecture.graph`). `schema_version` versions
+    that payload independently of VAOS releases. The payload must contain
+    JSON-compatible values so every storage backend can persist it without
+    backend-specific transformations.
+    """
+
+    analysis_run_id: UUID
+    repository_id: UUID
+    artifact_type: str
+    producer: str
+    payload: dict[str, Any]
+    schema_version: int = 1
+    source_file_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        """Validate identifiers, names, schema version and JSON payload."""
+        import json
+
+        if not self.artifact_type.strip():
+            raise ValidationError("AnalysisArtifact.artifact_type must not be empty")
+        if not self.producer.strip():
+            raise ValidationError("AnalysisArtifact.producer must not be empty")
+        if self.schema_version < 1:
+            raise ValidationError("AnalysisArtifact.schema_version must be at least 1")
+        if not isinstance(self.payload, dict):
+            raise ValidationError("AnalysisArtifact.payload must be a dictionary")
+        try:
+            json.dumps(self.payload, allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                "AnalysisArtifact.payload must contain only JSON-compatible values"
+            ) from exc

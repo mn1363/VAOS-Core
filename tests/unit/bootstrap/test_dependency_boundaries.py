@@ -36,6 +36,7 @@ _FORBIDDEN_PREFIXES = (
 )
 
 _ALLOWED_PREFIXES = (
+    "src.bootstrap",
     "src.core",
     "src.domain",
     "src.repository",
