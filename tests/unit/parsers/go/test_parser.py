@@ -89,6 +89,20 @@ def test_parse_attaches_methods_to_their_receiver_struct() -> None:
     assert all(method.is_method for method in point.methods)
 
 
+def test_parse_attaches_generic_receiver_methods_to_their_struct() -> None:
+    """`parse` should attach methods with generic pointer receivers to their struct."""
+    content = (
+        "package main\n\n"
+        "type Box[T any] struct {\n\tValue T\n}\n\n"
+        "func (b *Box[T]) Get() T {\n\treturn b.Value\n}\n"
+    )
+    result = GoParser().parse(relative_path="box.go", content=content)
+
+    assert [cls.name for cls in result.classes] == ["Box"]
+    assert [method.name for method in result.classes[0].methods] == ["Get"]
+    assert result.classes[0].methods[0].is_method is True
+
+
 def test_parse_extracts_a_free_function_with_parameters_and_return() -> None:
     """`parse` should extract a top-level function's parameters and return type."""
     content = "package main\n\nfunc Add(x int, y int) (int, error) {\n\treturn x + y, nil\n}\n"

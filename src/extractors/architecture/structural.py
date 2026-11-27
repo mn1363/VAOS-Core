@@ -59,18 +59,17 @@ class StructuralArchitectureExtractor(ArchitectureExtractor):
 
 
 def _package_path(relative_path: str) -> tuple[str, ...]:
-    """Derive a file's package/namespace path from the directory portion of `relative_path`.
+    """Derive package segments from a repository-relative path on any host platform.
 
     Args:
-        relative_path: Path of the file, `/`-separated, typically relative to a repository
-            root.
+        relative_path: Repository-relative file path. Both POSIX and Windows separators are
+            accepted.
 
     Returns:
-        `relative_path`'s directory portion, split on `/`, as a tuple of segments -- e.g.
-        `("src", "extractors", "architecture")` for `src/extractors/architecture/base.py`.
-        `()` for a root-level file with no `/` in `relative_path`.
+        Directory segments as a tuple. A root-level file produces an empty tuple.
     """
-    if "/" not in relative_path:
+    normalized = relative_path.replace("\\", "/")
+    if "/" not in normalized:
         return ()
-    directory = relative_path.rsplit("/", 1)[0]
+    directory = normalized.rsplit("/", 1)[0]
     return tuple(directory.split("/"))

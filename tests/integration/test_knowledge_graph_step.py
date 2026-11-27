@@ -20,7 +20,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from src.bootstrap.analysis_steps import build_analysis_steps
+from src.bootstrap.analysis_steps import RepositoryScoped, build_analysis_steps
 from src.bootstrap.knowledge_graph_step import build_knowledge_graph_step
 from src.bootstrap.wiring import bootstrap
 from src.core.config import AppConfig
@@ -247,7 +247,16 @@ async def test_the_opt_in_step_is_deterministic_and_purely_additive(tmp_path: Pa
     assert first.step_names()[:-1] == default.step_names()
     assert first.step_names()[-1] == _STEP_NAME
     for key in _DETERMINISTIC_KEYS:
-        assert first.context.require(key) == default.context.require(key), key
+        first_value = first.context.require(key)
+        default_value = default.context.require(key)
+        if (
+            isinstance(first_value, tuple)
+            and first_value
+            and isinstance(first_value[0], RepositoryScoped)
+        ):
+            first_value = tuple(item.result for item in first_value)
+            default_value = tuple(item.result for item in default_value)
+        assert first_value == default_value, key
 
 
 @pytest.mark.asyncio

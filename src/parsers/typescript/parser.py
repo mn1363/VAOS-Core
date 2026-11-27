@@ -19,10 +19,9 @@ quoted strings, template literals, and heuristically detected regular-expression
 comment markers inside them are left alone. Its literal half is the mask used for brace-depth
 analysis. Both halves come from the same result, so they cannot disagree about where a literal
 ends. Template literals are tracked to any nesting depth: a `${...}` expression is code, and
-strings, comments, and further templates inside it are handled in turn. What remains outside the
-scan: JSX is not parsed (JSX text containing an apostrophe is read as the start of a string that
-ends at its line break), and a regular-expression literal the heuristic mistakes for division, or
-the reverse, can misplace a quote.
+strings, comments, and further templates inside it are handled in turn. JSX in TSX files is
+handled by a lightweight tag/text state machine, not a full JSX parser. Regular-expression versus
+division classification remains heuristic and can be ambiguous in uncommon expression contexts.
 """
 
 import re
@@ -151,7 +150,9 @@ class TypeScriptParser(Parser):
             ValidationError: If `relative_path` is blank.
         """
         require_relative_path(relative_path)
-        scan, structural_scan = _scan_typescript(content)
+        scan, structural_scan = _scan_typescript(
+            content, allow_jsx=relative_path.lower().endswith(".tsx")
+        )
         lines = content.splitlines()
         metadata = build_file_metadata(
             relative_path=relative_path, language=SourceLanguage.TYPESCRIPT, content=content
@@ -219,7 +220,7 @@ class TypeScriptParser(Parser):
         )
 
 
-def strip_typescript_comments(content: str) -> str:
+def strip_typescript_comments(content: str, *, allow_jsx: bool = False) -> str:
     """Blank out `//` and `/* ... */` comments in TypeScript `content`, leaving literals intact.
 
     A TypeScript-aware replacement for the shared `strip_c_style_comments`, which does not
@@ -233,30 +234,32 @@ def strip_typescript_comments(content: str) -> str:
 
     Args:
         content: The full source text to scan.
+        allow_jsx: Whether to treat JSX text as markup. Defaults to false because this helper
+            does not know the source file extension.
 
     Returns:
         `content` with every comment's characters (other than newlines) replaced by spaces.
     """
-    return _lex_typescript(content)[0]
+    return _lex_typescript(content, allow_jsx=allow_jsx)[0]
 
 
-def _scan_typescript(content: str) -> tuple[str, str]:
+def _scan_typescript(content: str, *, allow_jsx: bool = True) -> tuple[str, str]:
     """Return `(scan, structural_scan)` for `content` from one lexical pass.
 
-    `scan` is `content` with comments blanked. `structural_scan` is `scan` with every string,
-    template, and regular-expression literal blanked to NUL characters (line breaks kept), and is
-    the only text used for brace-depth and member-boundary decisions. Both come from the same
-    `_lex_typescript` result, so the comment stripper and the literal mask cannot disagree about
-    where a literal begins or ends.
+    `scan` is `content` with comments blanked. `structural_scan` is `scan` with strings,
+    templates, regular expressions, and JSX elements blanked to NUL characters. JSX parsing is
+    enabled for TSX input. Both outputs come from the same lexical pass.
     """
-    scan, literal_spans = _lex_typescript(content)
+    scan, literal_spans = _lex_typescript(content, allow_jsx=allow_jsx)
     masked = list(scan)
     for start, end in literal_spans:
         _blank_span(masked, start, end)
     return scan, "".join(masked)
 
 
-def _lex_typescript(content: str) -> tuple[str, list[tuple[int, int]]]:
+def _lex_typescript(
+    content: str, *, allow_jsx: bool = True
+) -> tuple[str, list[tuple[int, int]]]:
     """Run the single lexical pass shared by comment stripping and literal masking.
 
     Walks `content` once, classifying each position as code, comment, or literal, and returns
@@ -280,9 +283,9 @@ def _lex_typescript(content: str) -> tuple[str, list[tuple[int, int]]]:
 
     A template literal that is never closed ends at the end of the file.
 
-    This is a lightweight scan, not a TypeScript lexer: a regular-expression literal the heuristic
-    takes for division (or the reverse) can misplace a quote, and JSX is not parsed, so JSX text
-    containing an apostrophe is read as the start of a string that ends at its line break.
+    This is a lightweight scan, not a full TypeScript or JSX parser. JSX tag and text regions are
+    skipped for structural analysis, while JavaScript inside JSX expression containers is scanned.
+    Regular-expression versus division classification remains heuristic in uncommon contexts.
 
     Args:
         content: The full source text to scan.
@@ -298,8 +301,87 @@ def _lex_typescript(content: str) -> tuple[str, list[tuple[int, int]]]:
     in_template = False
     template_starts: list[int] = []
     interpolation_braces: list[int] = []
+    jsx_modes: list[str] = []
+    jsx_depths: list[int] = []
+    jsx_return_modes: list[str] = []
+    jsx_expression_depths: list[int] = []
+    jsx_starts: list[int] = []
+    jsx_closing_tags: list[bool] = []
+    jsx_outermost: list[bool] = []
+
     while index < length:
         character = content[index]
+
+        if jsx_modes and jsx_modes[-1] == "text":
+            if character == "<":
+                jsx_modes[-1] = "tag"
+                jsx_closing_tags[-1] = content.startswith("</", index)
+                index += 2 if jsx_closing_tags[-1] else 1
+            elif character == "{":
+                jsx_return_modes.append("text")
+                jsx_modes[-1] = "expression"
+                jsx_expression_depths[-1] = 0
+                previous_word = "{"
+                index += 1
+            else:
+                index += 1
+            continue
+
+        if jsx_modes and jsx_modes[-1] == "tag":
+            if character in "'\"":
+                index = _quoted_string_end(content, index)
+            elif character == "{":
+                jsx_return_modes.append("tag")
+                jsx_modes[-1] = "expression"
+                jsx_expression_depths[-1] = 0
+                previous_word = "{"
+                index += 1
+            elif character == ">":
+                previous = index - 1
+                while previous >= jsx_starts[-1] and content[previous].isspace():
+                    previous -= 1
+                self_closing = previous >= jsx_starts[-1] and content[previous] == "/"
+                if jsx_closing_tags[-1]:
+                    jsx_depths[-1] -= 1
+                elif not self_closing:
+                    jsx_depths[-1] += 1
+
+                index += 1
+                if jsx_depths[-1] == 0:
+                    start = jsx_starts.pop()
+                    outermost = jsx_outermost.pop()
+                    jsx_modes.pop()
+                    jsx_depths.pop()
+                    jsx_return_modes.pop()
+                    jsx_expression_depths.pop()
+                    jsx_closing_tags.pop()
+                    if outermost:
+                        literal_spans.append((start, index))
+                    previous_word = "literal"
+                else:
+                    jsx_modes[-1] = "text"
+            else:
+                index += 1
+            continue
+
+        if jsx_modes and jsx_modes[-1] == "expression":
+            closes_template_interpolation = (
+                character == "}"
+                and interpolation_braces
+                and interpolation_braces[-1] == 0
+            )
+            if closes_template_interpolation:
+                pass
+            elif character == "{":
+                jsx_expression_depths[-1] += 1
+            elif character == "}":
+                if jsx_expression_depths[-1] == 0:
+                    jsx_modes[-1] = jsx_return_modes.pop()
+                    previous_word = "literal"
+                    index += 1
+                    continue
+                jsx_expression_depths[-1] -= 1
+
         if in_template:
             if character == "\\":
                 index += 2
@@ -339,6 +421,15 @@ def _lex_typescript(content: str) -> tuple[str, list[tuple[int, int]]]:
             template_starts.append(index)
             in_template = True
             index += 1
+        elif allow_jsx and character == "<" and _is_jsx_element_start(content, index, previous_word):
+            jsx_modes.append("tag")
+            jsx_depths.append(0)
+            jsx_return_modes.append("text")
+            jsx_expression_depths.append(0)
+            jsx_starts.append(index)
+            jsx_closing_tags.append(False)
+            jsx_outermost.append(not jsx_modes[:-1])
+            index += 1
         elif character.isalnum() or character in "_$":
             start = index
             while index < length and (content[index].isalnum() or content[index] in "_$"):
@@ -356,8 +447,11 @@ def _lex_typescript(content: str) -> tuple[str, list[tuple[int, int]]]:
                         interpolation_braces[-1] -= 1
             previous_word = character
             index += 1
+
     if template_starts:
         literal_spans.append((template_starts[0], length))
+    if jsx_starts and jsx_outermost and jsx_outermost[0]:
+        literal_spans.append((jsx_starts[0], length))
     return "".join(chars), literal_spans
 
 
@@ -440,14 +534,92 @@ def _blank_span(masked: list[str], start: int, end: int) -> None:
             masked[position] = "\x00"
 
 
+def _matching_angle_bracket(content: str, opening: int) -> int | None:
+    """Return the closing angle bracket for a balanced generic parameter list."""
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for position in range(opening, len(content)):
+        character = content[position]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == quote:
+                quote = None
+            continue
+        if character in "\"'`":
+            quote = character
+        elif character == "<":
+            depth += 1
+        elif character == ">" and not (
+            position > opening and content[position - 1] == "="
+        ):
+            depth -= 1
+            if depth == 0:
+                return position
+    return None
+
+
+def _is_jsx_element_start(content: str, index: int, previous_word: str) -> bool:
+    """Recognize JSX starts in common expression positions without parsing type syntax."""
+    if index + 1 >= len(content) or not (
+        content[index + 1] == ">" or content[index + 1].isalpha() or content[index + 1] in "_$"
+    ):
+        return False
+
+    previous = index - 1
+    while previous >= 0 and content[previous].isspace():
+        previous -= 1
+
+    # A generic arrow function in TSX is not a JSX element. Match the
+    # complete type-parameter list because constraints can contain nested
+    # generic types, such as `T extends Record<string, unknown>`.
+    closing = _matching_angle_bracket(content, index)
+    if closing is not None:
+        following = closing + 1
+        while following < len(content) and content[following].isspace():
+            following += 1
+        header = content[index + 1 : closing]
+        if following < len(content) and content[following] == "(" and (
+            "," in header or "extends" in header or "=" in header
+        ):
+            return False
+
+    if previous_word in {"return", "default"}:
+        return True
+    if previous < 0 or content[previous] in "=(:,[!&|?{};":
+        return True
+    return content[previous] == ">" and previous > 0 and content[previous - 1] == "="
+
+
 def _is_regex_literal_start(scan: Sequence[str], index: int, previous_word: str) -> bool:
     """Recognize common expression positions where slash starts a regex literal."""
-    if previous_word in {"return", "throw", "case", "delete", "void", "typeof", "instanceof", "in", "of", "yield", "await"}:
+    if previous_word in {
+        "return",
+        "throw",
+        "case",
+        "delete",
+        "void",
+        "typeof",
+        "instanceof",
+        "in",
+        "of",
+        "yield",
+        "await",
+    }:
         return True
     previous = index - 1
     while previous >= 0 and scan[previous].isspace():
         previous -= 1
-    return previous < 0 or scan[previous] in "=(:,[!&|?{};"
+    if previous < 0:
+        return True
+    if scan[previous] in "+-*%":
+        return True
+    if scan[previous] == ">" and previous > 0 and scan[previous - 1] == "=":
+        return True
+    return scan[previous] in "=(:,[!&|?{};"
 
 
 

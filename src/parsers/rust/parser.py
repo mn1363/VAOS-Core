@@ -60,7 +60,9 @@ _CONST_STATIC_PATTERN = re.compile(
     rf"^[ \t]*{_VIS}(?:const|static)\s+(?:mut\s+)?(?P<name>\w+)\s*:", re.MULTILINE
 )
 _STRUCT_PATTERN = re.compile(
-    rf"^[ \t]*{_VIS}struct\s+(?P<name>\w+)(?:<[^>]*>)?\s*(?P<form>[{{(;])", re.MULTILINE
+    rf"^[ \t]*{_VIS}struct\s+(?P<name>\w+)(?:<[^>]*>)?"
+    rf"\s*(?:where\b[\s\S]*?)?(?P<form>[{{(;])",
+    re.MULTILINE,
 )
 _FN_PATTERN = re.compile(
     rf"^[ \t]*{_VIS}(?P<async>async\s+)?(?:unsafe\s+)?(?:extern\s+\"[^\"]*\"\s+)?"

@@ -22,10 +22,8 @@ from src.bootstrap.analysis_steps import (
     _select_successful_parse_results,
     build_analysis_steps,
 )
-from src.bootstrap.errors import BootstrapError
 from src.core.config import AppConfig
 from src.domain.entities import RepositoryProvider, SourceLanguage, SourceRepository
-from src.graph.architecture.structural import StructuralArchitectureGraphBuilder
 from src.graph.dependency.structural import StructuralDependencyGraphBuilder
 from src.parsers.base import FileMetadata, ParseResult, compute_content_hash
 from src.parsers.cpp.parser import CppParser
@@ -132,22 +130,10 @@ def test_require_single_repository_accepts_one() -> None:
     assert _require_single_repository((repository,)) == (repository,)
 
 
-def test_require_single_repository_rejects_multiple() -> None:
-    """More than one repository raises `BootstrapError`."""
+def test_require_single_repository_accepts_multiple() -> None:
+    """Multiple repositories pass through for independent, repository-scoped analysis."""
     repositories = (_repository("a"), _repository("b"))
-    with pytest.raises(BootstrapError):
-        _require_single_repository(repositories)
-
-
-def test_require_single_repository_error_details() -> None:
-    """The raised `BootstrapError` carries the exact repository count and names."""
-    repositories = (_repository("a"), _repository("b"))
-    with pytest.raises(BootstrapError) as exc_info:
-        _require_single_repository(repositories)
-    assert exc_info.value.details == {
-        "repository_count": 2,
-        "repository_names": ["a", "b"],
-    }
+    assert _require_single_repository(repositories) == repositories
 
 
 # --- 5: _clone_repository_func --------------------------------------------------------------
@@ -374,8 +360,11 @@ def test_build_analysis_steps_exact_input_and_output_keys(tmp_path: Path) -> Non
         "extract_architecture": (("successful_parse_results",), "architecture_results"),
         "extract_interfaces": (("successful_parse_results",), "interface_results"),
         "extract_foundation": (("successful_parse_results",), "foundation_results"),
-        "build_architecture_graph": (("architecture_results",), "architecture_graph"),
-        "build_dependency_graph": (("import_results",), "dependency_graph"),
+        "build_architecture_graph": (
+            ("repositories", "architecture_results"),
+            "architecture_graph",
+        ),
+        "build_dependency_graph": (("repositories", "import_results"), "dependency_graph"),
     }
 
 
@@ -465,12 +454,10 @@ def test_build_architecture_graph_step_contract(tmp_path: Path) -> None:
     step = build_analysis_steps(config)[11]
     assert step.name == "build_architecture_graph"
     assert isinstance(step, CallableStep)
-    assert step._input_keys == ("architecture_results",)  # type: ignore[attr-defined]
+    assert step._input_keys == ("repositories", "architecture_results")  # type: ignore[attr-defined]
     assert step._output_key == "architecture_graph"  # type: ignore[attr-defined]
     assert step._is_async is False  # type: ignore[attr-defined]
-    bound = step._func  # type: ignore[attr-defined]
-    assert isinstance(bound.__self__, StructuralArchitectureGraphBuilder)
-    assert bound.__func__ is StructuralArchitectureGraphBuilder.build
+    assert callable(step._func)  # type: ignore[attr-defined]
 
 
 def test_build_dependency_graph_is_the_last_step(tmp_path: Path) -> None:
@@ -499,12 +486,10 @@ def test_build_dependency_graph_step_contract(tmp_path: Path) -> None:
     assert type(step) is CallableStep
     assert not isinstance(step, MapStep)
     assert step.name == "build_dependency_graph"
-    assert step._input_keys == ("import_results",)  # type: ignore[attr-defined]
+    assert step._input_keys == ("repositories", "import_results")  # type: ignore[attr-defined]
     assert step._output_key == "dependency_graph"  # type: ignore[attr-defined]
     assert step._is_async is False  # type: ignore[attr-defined]
-    bound = step._func  # type: ignore[attr-defined]
-    assert isinstance(bound.__self__, StructuralDependencyGraphBuilder)
-    assert bound.__func__ is StructuralDependencyGraphBuilder.build
+    assert callable(step._func)  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -514,6 +499,7 @@ async def test_build_dependency_graph_step_writes_the_builders_graph(tmp_path: P
     config = _config({"repository": {"workspace_root": str(tmp_path)}})
     step = build_analysis_steps(config)[-1]
     context = PipelineContext()
+    context.set("repositories", ())
     context.set("import_results", ())
 
     returned = await step.execute(context)

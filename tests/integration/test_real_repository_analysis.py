@@ -25,14 +25,12 @@ from src.bootstrap.analysis_steps import (
     _parse_files_func,
     build_analysis_steps,
 )
-from src.bootstrap.errors import BootstrapError
 from src.bootstrap.wiring import bootstrap, build_repository_client, build_workspace_manager
 from src.core.config import AppConfig
 from src.extractors.interfaces.base import InterfaceOrigin
 from src.graph.architecture.base import ArchitectureGraph
 from src.graph.dependency.base import DependencyGraph, DependencyNodeKind
 from src.graph.dependency.structural import StructuralDependencyGraphBuilder
-from src.pipeline.base import StepExecutionError
 
 
 def _config(raw: dict[str, object]) -> AppConfig:
@@ -72,9 +70,7 @@ def _write_fixture_repository(root: Path) -> None:
     nested = root / "pkg" / "sub"
     nested.mkdir(parents=True)
     (root / "pkg" / "__init__.py").write_text("", encoding="utf-8")
-    (nested / "util.py").write_text(
-        "def helper(value):\n    return value\n", encoding="utf-8"
-    )
+    (nested / "util.py").write_text("def helper(value):\n    return value\n", encoding="utf-8")
     (root / "greeter.go").write_text(
         "package main\n\ntype Greeter struct{}\n\nfunc Greet() {}\n", encoding="utf-8"
     )
@@ -160,9 +156,7 @@ async def test_real_repository_analysis_executes_against_one_real_local_reposito
 
     successful_parse_results = result.context.require("successful_parse_results")
     assert all(r.succeeded for r in successful_parse_results)
-    assert len(successful_parse_results) == len(
-        [r for r in parse_results if r.succeeded]
-    )
+    assert len(successful_parse_results) == len([r for r in parse_results if r.succeeded])
     # order is preserved: successful results appear in the same relative order as in
     # parse_results, with failures simply omitted.
     assert [r.relative_path for r in successful_parse_results] == [
@@ -267,9 +261,7 @@ async def test_real_repository_analysis_produces_the_dependency_graph(tmp_path: 
     assert dependency_graph.edge_count == sum(len(r.edges) for r in import_results)
 
     # every successfully parsed file is exactly one INTERNAL_FILE node.
-    successful_paths = {
-        r.relative_path for r in result.context.require("successful_parse_results")
-    }
+    successful_paths = {r.relative_path for r in result.context.require("successful_parse_results")}
     internal_file_nodes = {
         node.identifier
         for node in dependency_graph.nodes
@@ -334,29 +326,32 @@ async def test_real_repository_analysis_is_deterministic_across_repeated_runs(
         "architecture_results",
         "interface_results",
         "foundation_results",
-        "dependency_graph",
     ):
-        assert first.require(key) == second.require(key)
+        assert tuple(item.result for item in first.require(key)) == tuple(
+            item.result for item in second.require(key)
+        )
+    assert first.require("dependency_graph") == second.require("dependency_graph")
 
 
 @pytest.mark.asyncio
-async def test_require_single_repository_rejects_multiple_local_repositories(
+async def test_multiple_local_repositories_are_analyzed_independently(
     tmp_path: Path,
 ) -> None:
-    """Two repositories discovered by `LocalCollector` under one scan root are rejected at
-    `require_single_repository`, not silently analyzed as if they were one."""
+    """Two repositories with the same relative path keep separate parser and graph ownership."""
     if shutil.which("git") is None:
         pytest.skip("git executable not found on PATH")
 
     scan_root = tmp_path / "scan_root"
-    for name in ("repo_one", "repo_two"):
+    for name, source in (("repo_one", "import b\n"), ("repo_two", "value_two = 2\n")):
         repo = scan_root / name
         repo.mkdir(parents=True)
         _run_git("init", cwd=repo)
         _run_git("config", "user.email", "test@example.com", cwd=repo)
         _run_git("config", "user.name", "Test", cwd=repo)
         _run_git("checkout", "-b", "main", cwd=repo)
-        (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+        (repo / "a.py").write_text(source, encoding="utf-8")
+        if name == "repo_two":
+            (repo / "b.py").write_text("value_b = 3\n", encoding="utf-8")
         _run_git("add", "-A", cwd=repo)
         _run_git("commit", "-m", "init", cwd=repo)
 
@@ -370,12 +365,33 @@ async def test_require_single_repository_rejects_multiple_local_repositories(
             "repository": {"workspace_root": str(tmp_path / "workspaces")},
         }
     )
+    result = await bootstrap(config, extra_steps=build_analysis_steps(config))
 
-    with pytest.raises(StepExecutionError) as exc_info:
-        await bootstrap(config, extra_steps=build_analysis_steps(config))
+    repositories = result.context.require("repositories")
+    files = result.context.require("files_to_parse")
+    parse_results = result.context.require("parse_results")
+    architecture_graphs = result.context.require("architecture_graph")
+    dependency_graphs = result.context.require("dependency_graph")
 
-    assert exc_info.value.details["failed_step"] == "require_single_repository"
-    assert isinstance(exc_info.value.__cause__, BootstrapError)
+    assert len(repositories) == 2
+    assert len(files) == 3
+    assert {file.relative_path for file in files} == {"a.py", "b.py"}
+    assert {file.repository_id for file in files} == {repo.id for repo in repositories}
+    assert {item.repository_id for item in parse_results} == {repo.id for repo in repositories}
+    assert len(architecture_graphs) == 2
+    assert len(dependency_graphs) == 2
+    assert {item.repository_id for item in architecture_graphs} == {
+        repo.id for repo in repositories
+    }
+    assert {item.repository_id for item in dependency_graphs} == {repo.id for repo in repositories}
+
+    repo_one = next(repo for repo in repositories if repo.name == "repo_one")
+    repo_one_graph = next(
+        item.graph for item in dependency_graphs if item.repository_id == repo_one.id
+    )
+    assert len(repo_one_graph.edges) == 1
+    assert repo_one_graph.edges[0].target == "external:b"
+    assert repo_one_graph.edges[0].is_internal is False
 
 
 # --- equivalence with the Reference Flow's own test-local helpers -----------------------------

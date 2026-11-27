@@ -51,6 +51,18 @@ def test_nested_path_produces_full_directory_segments() -> None:
     assert unit.package_path == ("src", "extractors", "architecture")
 
 
+def test_windows_nested_path_produces_full_directory_segments() -> None:
+    """Windows separators produce the same package segments as POSIX separators."""
+    parse_result = PythonParser().parse(
+        relative_path=r"src\extractors\architecture\base.py", content="x = 1\n"
+    )
+    result = StructuralArchitectureExtractor().extract(parse_result)
+
+    unit = result.unit
+    assert unit is not None
+    assert unit.package_path == ("src", "extractors", "architecture")
+
+
 # --- is_package_root, across languages ----------------------------------------------------------
 
 
@@ -61,6 +73,17 @@ def test_python_init_py_is_a_package_root() -> None:
 
     unit = result.unit
     assert unit is not None
+    assert unit.is_package_root is True
+
+
+def test_windows_python_init_py_is_a_package_root() -> None:
+    """A Windows-style Python package marker is recognized."""
+    parse_result = PythonParser().parse(relative_path=r"pkg\__init__.py", content="")
+    result = StructuralArchitectureExtractor().extract(parse_result)
+
+    unit = result.unit
+    assert unit is not None
+    assert unit.package_path == ("pkg",)
     assert unit.is_package_root is True
 
 

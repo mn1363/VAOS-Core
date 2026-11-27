@@ -1494,15 +1494,52 @@ def test_strip_typescript_comments_treats_slash_in_expression_position_as_a_rege
     "code",
     ["const t = s => /'/.test(s); ", "const t = 'a' + /'/.source; "],
 )
-def test_regex_heuristic_misses_a_regex_after_an_arrow_or_arithmetic_operator(code: str) -> None:
-    """Documented limitation: the heuristic reads `/` after `>` or `+` as division.
+def test_regex_heuristic_recognizes_a_regex_after_arrow_or_arithmetic(code: str) -> None:
+    """Regex literals after arrows and arithmetic operators must not hide later comments."""
+    comment = "// tail 'quote\n"
+    assert strip_typescript_comments(code + comment) == code + _blank(comment)
 
-    The regex's quote then opens a string that ends at the line break and hides the comment after
-    it. The heuristic is shared by comment stripping and literal masking and is unchanged here.
-    """
-    content = code + "// tail 'quote"
 
-    assert strip_typescript_comments(content) == content
+@pytest.mark.parametrize(
+    "code",
+    [
+        "const test = value => /'/.test(value); ",
+        "const test = 'value' + /'/.source; ",
+        "const test = value * /[/*']/.test(value); ",
+    ],
+)
+def test_strip_typescript_comments_recognizes_regex_after_arrow_and_arithmetic(
+    code: str,
+) -> None:
+    """A regex after an arrow or arithmetic operator must not hide a trailing comment."""
+    comment = "// tail 'quote\n"
+
+    assert strip_typescript_comments(code + comment) == code + _blank(comment)
+
+
+def test_parse_keeps_declarations_after_jsx_text_with_apostrophes_and_slashes() -> None:
+    """JSX text must not become a string or a JavaScript comment."""
+    content = """const element = <p>Don't stop // this is JSX text</p>;
+function visible() {}
+interface After { value: string }
+"""
+    result = TypeScriptParser().parse(relative_path="view.tsx", content=content)
+    jsx_start = content.index("<p>")
+    jsx_end = content.index("</p>") + len("</p>")
+    _, structural = _scan_typescript(content)
+    assert [function.name for function in result.functions] == ["visible"]
+    assert [interface.name for interface in result.interfaces] == ["After"]
+    assert strip_typescript_comments(content, allow_jsx=True) == content
+    assert "\x00" in structural[jsx_start:jsx_end]
+
+
+def test_strip_typescript_comments_strips_comments_inside_jsx_expressions() -> None:
+    """JavaScript comments inside JSX expression containers are still comments."""
+    content = """const element = <p>{/* hidden comment */}Hello</p>;
+interface After { value: string }
+"""
+
+    assert "hidden comment" not in strip_typescript_comments(content, allow_jsx=True)
 
 
 def test_parse_ignores_braces_inside_regex_literals_but_not_after_division() -> None:
@@ -1530,11 +1567,9 @@ interface After { c: string }
     assert [i.name for i in result.interfaces] == ["After"]
 
 
-def test_jsx_text_apostrophe_only_affects_its_own_line() -> None:
-    """JSX is not parsed: an apostrophe in JSX text starts a string that ends at its line break.
+def test_jsx_text_apostrophe_does_not_hide_later_declarations() -> None:
+    """An apostrophe in JSX text must not start a JavaScript string literal."""
 
-    The damage is bounded by that line; comments and declarations after it are unaffected.
-    """
     content = """const el = <p>Don't panic</p>;
 // real comment: interface Hidden { a: string }
 interface After { a: string }
@@ -1542,14 +1577,45 @@ interface After { a: string }
     result = TypeScriptParser().parse(relative_path="view.tsx", content=content)
 
     assert [i.name for i in result.interfaces] == ["After"]
-    assert "Hidden" not in strip_typescript_comments(content)
+    assert "Hidden" not in strip_typescript_comments(content, allow_jsx=True)
 
 
-def test_jsx_text_apostrophe_hides_a_comment_marker_on_the_same_line() -> None:
-    """Documented limitation: JSX text is not recognized, so the apostrophe opens a string."""
+def test_jsx_text_apostrophe_preserves_comment_marker_on_the_same_line() -> None:
+    """Apostrophes and comment markers inside JSX text must remain ordinary text."""
     content = "const el = <p>Don't // not stripped</p>;\n"
 
-    assert strip_typescript_comments(content) == content
+    assert strip_typescript_comments(content, allow_jsx=True) == content
+
+
+def test_strip_typescript_comments_preserves_slashes_in_jsx_text() -> None:
+    """A slash pair in JSX text is not a JavaScript line comment."""
+    content = "const element = <p>Hello // still text</p>;\n"
+
+    assert strip_typescript_comments(content, allow_jsx=True) == content
+
+
+def test_parse_handles_nested_jsx_fragments_and_expressions() -> None:
+    """Nested tags and JSX expression containers must not change source scope."""
+    content = """const element = <>
+    <section title="a > b">{items.map(item => <span title={`value: ${item.name}`}>{item.name}</span>)}</section>
+</>;
+interface After { value: string }
+"""
+    result = TypeScriptParser().parse(relative_path="nested.tsx", content=content)
+
+    assert [interface.name for interface in result.interfaces] == ["After"]
+    assert result.functions == ()
+
+
+def test_parse_keeps_generic_arrow_functions_in_tsx_out_of_jsx_mode() -> None:
+    """A generic arrow function in TSX is not an opening JSX tag."""
+    content = """const identity = <T,>(value: T): T => value;
+interface After { value: string }
+"""
+    result = TypeScriptParser().parse(relative_path="generic.tsx", content=content)
+
+    assert [function.name for function in result.functions] == ["identity"]
+    assert [interface.name for interface in result.interfaces] == ["After"]
 
 
 # --- class bodies: braces in literals must not move class or method boundaries -----------
@@ -3882,3 +3948,41 @@ function tail(): void {}
         ("extends", "boolean"),
     ]
     assert [(f.name, f.line_number) for f in result.functions] == [("tail", 9)]
+
+
+
+def test_parse_generic_arrow_with_nested_generic_constraint_in_tsx() -> None:
+    """Nested generic constraints must not make a generic arrow look like JSX."""
+    content = """const identity = <T extends Record<string, unknown>>(
+  value: T
+): T => value;
+interface After { value: string }
+"""
+
+    result = TypeScriptParser().parse(relative_path="nested-generic.tsx", content=content)
+
+    assert [function.name for function in result.functions] == ["identity"]
+    assert [interface.name for interface in result.interfaces] == ["After"]
+
+
+def test_strip_typescript_comments_defaults_to_non_jsx_for_type_assertions() -> None:
+    """The extension-agnostic helper must parse TypeScript without JSX by default."""
+    content = "const item = <Product>value; // trailing comment\ninterface After { value: string }"
+
+    result = strip_typescript_comments(content)
+
+    assert "trailing comment" not in result
+    assert "interface After" in result
+
+
+
+def test_parse_generic_arrow_constraint_with_function_type_in_tsx() -> None:
+    """An arrow in a function-type constraint is not a generic-list closer."""
+    content = """const identity = <T extends (value: string) => unknown>(value: T): T => value;
+interface After { value: string }
+"""
+
+    result = TypeScriptParser().parse(relative_path="function-constraint.tsx", content=content)
+
+    assert [function.name for function in result.functions] == ["identity"]
+    assert [interface.name for interface in result.interfaces] == ["After"]

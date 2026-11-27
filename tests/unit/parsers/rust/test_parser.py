@@ -93,6 +93,21 @@ def test_parse_extracts_a_struct_with_docstring() -> None:
     assert point.docstring == "A point in space."
 
 
+def test_parse_extracts_a_struct_with_a_where_clause() -> None:
+    """`parse` should extract a generic struct with a multiline `where` clause."""
+    content = (
+        "pub struct Store<T>\n"
+        "where\n"
+        "    T: Clone,\n"
+        "{\n"
+        "    value: T,\n"
+        "}\n"
+    )
+    result = RustParser().parse(relative_path="lib.rs", content=content)
+
+    assert [cls.name for cls in result.classes] == ["Store"]
+
+
 def test_parse_attaches_inherent_impl_methods_to_their_struct() -> None:
     """`parse` should attach a `impl Point { fn ... }` method to the `Point` class."""
     content = (

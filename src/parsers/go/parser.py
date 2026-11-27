@@ -50,7 +50,7 @@ _INTERFACE_PATTERN = re.compile(
 _TYPE_ALIAS_PATTERN = re.compile(r"^[ \t]*type\s+(?P<name>\w+)\s*=?\s*[^\n{]+$", re.MULTILINE)
 _FUNC_PATTERN = re.compile(
     r"^[ \t]*func\s+"
-    r"(?:\(\s*\w*\s*\*?(?P<recv_type>\w+)\s*\)\s+)?"
+    r"(?:\(\s*\w*\s*\*?(?P<recv_type>\w+)(?:\s*\[[^\]]+\])?\s*\)\s+)?"
     r"(?P<name>\w+)(?:\[[^\]]*\])?\s*\(",
     re.MULTILINE,
 )

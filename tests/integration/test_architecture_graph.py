@@ -76,9 +76,7 @@ def _write_fixture_repository(root: Path) -> None:
 
     web = root / "web"
     web.mkdir()
-    (web / "index.ts").write_text(
-        "export interface Shape { area(): number }\n", encoding="utf-8"
-    )
+    (web / "index.ts").write_text("export interface Shape { area(): number }\n", encoding="utf-8")
 
     core = root / "core"
     core.mkdir()
@@ -208,8 +206,8 @@ async def test_composition_writes_architecture_graph_equal_to_direct_build(
     ]
     assert all(r.succeeded is True for r in architecture_results)
     assert result.context.require("architecture_results") is architecture_results
-    assert architecture_results == tuple(
-        StructuralArchitectureExtractor().extract(parse_result)
+    assert tuple(item.result for item in architecture_results) == tuple(
+        StructuralArchitectureExtractor().extract(parse_result.result)
         for parse_result in successful_parse_results
     )
 
@@ -226,8 +224,8 @@ async def test_two_independent_runs_produce_equal_architecture_graphs(tmp_path: 
     second_graph = second.context.require("architecture_graph")
     assert isinstance(first_graph, ArchitectureGraph)
     assert first_graph == second_graph
-    assert first.context.require("architecture_results") == second.context.require(
-        "architecture_results"
+    assert tuple(item.result for item in first.context.require("architecture_results")) == tuple(
+        item.result for item in second.context.require("architecture_results")
     )
 
 
@@ -351,9 +349,7 @@ async def test_real_results_produce_the_exact_posix_graph(tmp_path: Path) -> Non
                 file_paths=("pkg/sub/__init__.py",),
                 has_package_root_file=True,
             ),
-            PackageNode(
-                package_path=("pkg", "sub", "deep"), file_paths=("pkg/sub/deep/util.py",)
-            ),
+            PackageNode(package_path=("pkg", "sub", "deep"), file_paths=("pkg/sub/deep/util.py",)),
             PackageNode(
                 package_path=("web",), file_paths=("web/index.ts",), has_package_root_file=True
             ),

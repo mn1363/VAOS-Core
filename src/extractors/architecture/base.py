@@ -182,14 +182,14 @@ def require_successful_parse(parse_result: ParseResult) -> ParseResult:
 
 
 def is_package_root_marker(relative_path: str) -> bool:
-    """Report whether `relative_path`'s final segment is a conventional package-root marker.
+    """Report whether the final path segment is a conventional package-root marker.
 
     Args:
-        relative_path: Path of the candidate file, typically relative to a repository root.
+        relative_path: Repository-relative path using POSIX or Windows separators.
 
     Returns:
-        True if the file's own name (the last `/`-separated segment) exactly matches one of the
-        conventional marker filenames this Port recognizes (e.g. `__init__.py`).
+        True if the file's own name exactly matches a recognized marker filename.
     """
-    name = relative_path.rsplit("/", 1)[-1]
+    normalized = relative_path.replace("\\", "/")
+    name = normalized.rsplit("/", 1)[-1]
     return name in _PACKAGE_ROOT_MARKERS

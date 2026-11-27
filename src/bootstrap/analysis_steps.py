@@ -9,42 +9,40 @@ additional `Step`s a caller appends via `bootstrap.wiring.bootstrap`/`build_appl
 default flow (`collect`, `unpack_repositories`, `persist_repositories`): every step here is
 additive, appended strictly after `persist_repositories`.
 
-**Scope.** Real-repository analysis composition is explicitly one-repository scoped, exactly as
-the Reference Flow itself already documented as an open question it left unresolved
-(`docs/reference_flow_summary.md`'s own "Extending to N repositories is an explicit, separate
-design question, not resolved here"). `_require_single_repository` closes that question the same
-way `bootstrap.wiring._unpack_repositories` already turns a `CollectionResult`'s own "failure
-reported as data" outcome into a raised exception: more than one collected repository is a wiring
-decision turning out to be invalid for this flow -- exactly `bootstrap.errors.BootstrapError`'s
-own documented scope -- so it is reused here, not replaced with a new exception type.
+**Repository scope.** Any number of repositories can pass through this composition.
+Each cloned workspace, file, parser result and extractor result carries its owning repository UUID
+in a small immutable wrapper. Relative paths stay unchanged inside each repository. Graph builders
+receive only the results for one repository, so identical paths in different repositories cannot
+collide and imports cannot resolve across repository boundaries. The single-repository graph
+context values retain their original graph type for compatibility; multi-repository graph values
+are tuples of `RepositoryGraph` records.
 
 **Failed parses.** `parse_files` still produces `ParseResult.failed(...)` for a file no parser
-supports (a `README.md`, for instance) -- unchanged Reference Flow behavior. Every concrete
-extractor already rejects a failed `ParseResult` (`require_successful_parse`), so
-`_select_successful_parse_results` bridges the two: it reads `parse_results` (retained, unchanged,
-successes and failures both, under its own key) and writes a second, filtered
-`successful_parse_results` tuple, preserving relative order, for every extractor step to consume.
+supports (a `README.md`, for instance) -- unchanged Parser behavior. The repository-scoped parse
+wrapper keeps the repository UUID attached to both successful and failed outcomes.
+`_select_successful_repository_parse_results` filters failures while preserving that UUID and
+the original order.
 
 **Extractors.** All six existing concrete extractors (`imports`, `ast`, `symbols`, `architecture`,
-`interfaces`, `foundation`) are wired in this one milestone -- each already independently tested,
-and already proven, together, to consume `successful_parse_results` deterministically. `patterns`
-is not wired: it remains intentionally Port-only (see this milestone's own Patterns Final Contract
-Discovery); no field of `graph.knowledge.base.KnowledgeGraphBuilder.build` requires it, since its
-`pattern_results` parameter already defaults to `()`.
+`interfaces`, `foundation`) keep their existing Parser and Extractor contracts. Small closure
+adapters unwrap each parse result for the existing extractor, then attach the same repository UUID
+to its output. `patterns` is not wired: it remains intentionally Port-only; the Knowledge Graph
+builder accepts an empty `pattern_results` tuple.
 
-**No new abstraction.** `_require_single_repository`, `_clone_repository_func`,
-`_enumerate_files`, `_parse_files_func`, and `_select_successful_parse_results` are plain
-functions/closure factories, matching `wiring.py`'s own `_persist_repository_func` convention --
-no service class, no registry, no dispatcher, no DI container, no service locator. Parser dispatch
-is `Parser.supports()` over a fixed, five-element tuple constructed once by `_all_parsers`, tried
-in a fixed order -- the same shape the Reference Flow itself already approved, not a registry.
+**No service layer.** Repository scoping uses immutable data records and plain functions or
+closures. It adds no registry, dispatcher, DI container or service locator. Parser dispatch is
+still `Parser.supports()` over a fixed, five-element tuple constructed once by `_all_parsers`,
+tried in a fixed order.
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+from uuid import UUID
 
 from src.core.config import AppConfig
 from src.domain.entities import SourceLanguage, SourceRepository
@@ -66,44 +64,72 @@ from src.pipeline.base import Step
 from src.pipeline.steps import CallableStep, MapStep
 from src.repository.base import RepositoryClient, WorkspaceManager
 
-from .errors import BootstrapError
 from .wiring import build_repository_client, build_workspace_manager
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryWorkspace:
+    """A cloned workspace with the identity of its owning repository."""
+
+    repository_id: UUID
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryFile:
+    """A decoded file with repository-scoped path identity."""
+
+    repository_id: UUID
+    relative_path: str
+    content: str
+
+    def __iter__(self) -> Iterator[str]:
+        """Keep legacy two-value unpacking available for single-repository callers."""
+        yield self.relative_path
+        yield self.content
+
+
+@dataclass(frozen=True, slots=True, eq=False)
+class RepositoryScoped[ResultT]:
+    """An existing parser or extractor result paired with its repository identity."""
+
+    repository_id: UUID
+    result: ResultT
+
+    def __getattr__(self, name: str) -> Any:
+        """Expose the wrapped result's attributes for existing read-only consumers."""
+        return getattr(self.result, name)
+
+    def __eq__(self, other: object) -> bool:
+        """Compare both owner identity and wrapped value."""
+        if not isinstance(other, RepositoryScoped):
+            return False
+        return self.repository_id == other.repository_id and self.result == other.result
+
+
+@dataclass(frozen=True, slots=True)
+class RepositoryGraph[ResultT]:
+    """A graph and the repository whose files were used to build it."""
+
+    repository_id: UUID
+    graph: ResultT
 
 
 def _require_single_repository(
     repositories: tuple[SourceRepository, ...],
 ) -> tuple[SourceRepository, ...]:
-    """Reject more than one collected repository; this composition is one-repository scoped.
+    """Accept any number of repositories for repository-scoped analysis.
 
-    Zero or one repository is returned unchanged -- this milestone does not require a repository
-    to be present, matching every other "empty is not an error" step already in the frozen
-    architecture (`Pipeline.run` on an empty `steps`, `Runtime.start`/`stop` on empty `services`,
-    `PatternExtractionResult.ok` with empty `patterns`).
+    Later steps carry each repository UUID beside its workspace, file, parser result and
+    extractor result. Equal relative paths from different repositories therefore remain
+    separate.
 
     Args:
-        repositories: The repositories `unpack_repositories` (the existing, frozen default step)
-            already produced.
+        repositories: Repositories produced by the collection and persistence steps.
 
     Returns:
-        `repositories`, unchanged.
-
-    Raises:
-        BootstrapError: If more than one repository is present. Real-repository analysis
-            composition has no repository-ownership DTO for disambiguating which downstream
-            `ParseResult`/extraction result belongs to which of several repositories -- exactly
-            the gap `docs/reference_flow_summary.md` already named and explicitly left
-            unresolved -- so more than one collected repository is rejected here rather than
-            silently analyzed as if it were one.
+        The original repository tuple, unchanged.
     """
-    if len(repositories) > 1:
-        raise BootstrapError(
-            "real-repository analysis composition is one-repository scoped, but "
-            f"{len(repositories)} repositories were collected",
-            details={
-                "repository_count": len(repositories),
-                "repository_names": [repository.name for repository in repositories],
-            },
-        )
     return repositories
 
 
@@ -142,6 +168,88 @@ def _clone_repository_func(
         return destination
 
     return _clone
+
+
+def _clone_repository_scoped_func(
+    repository_client: RepositoryClient, workspace_manager: WorkspaceManager
+) -> Callable[[SourceRepository], Awaitable[RepositoryWorkspace]]:
+    """Clone one repository and retain its identity beside the workspace path."""
+    clone = _clone_repository_func(repository_client, workspace_manager)
+
+    async def _clone_scoped(repository: SourceRepository) -> RepositoryWorkspace:
+        path = await clone(repository)
+        return RepositoryWorkspace(repository_id=repository.id, path=path)
+
+    return _clone_scoped
+
+
+def _enumerate_repository_files(
+    workspaces: tuple[RepositoryWorkspace, ...],
+) -> tuple[RepositoryFile, ...]:
+    """Enumerate text files while retaining the owning repository UUID."""
+    files: list[RepositoryFile] = []
+    for workspace in workspaces:
+        for relative_path, content in _enumerate_files((workspace.path,)):
+            files.append(
+                RepositoryFile(
+                    repository_id=workspace.repository_id,
+                    relative_path=relative_path,
+                    content=content,
+                )
+            )
+    return tuple(files)
+
+
+def _parse_repository_file_func(
+    parsers: tuple[Parser, ...],
+) -> Callable[[RepositoryFile], RepositoryScoped[ParseResult]]:
+    """Parse one file and preserve its repository identity in the outcome."""
+    parse = _parse_files_func(parsers)
+
+    def _parse_scoped(file: RepositoryFile) -> RepositoryScoped[ParseResult]:
+        result = parse((file.relative_path, file.content))
+        return RepositoryScoped(repository_id=file.repository_id, result=result)
+
+    return _parse_scoped
+
+
+def _select_successful_repository_parse_results(
+    parse_results: tuple[RepositoryScoped[ParseResult], ...],
+) -> tuple[RepositoryScoped[ParseResult], ...]:
+    """Filter failed parses without dropping repository ownership."""
+    return tuple(item for item in parse_results if item.result.succeeded)
+
+
+def _extract_repository_result_func[ResultT](
+    extractor: Callable[[ParseResult], ResultT],
+) -> Callable[[RepositoryScoped[ParseResult]], RepositoryScoped[ResultT]]:
+    """Adapt an existing single-file extractor to repository-scoped parse results."""
+
+    def _extract(item: RepositoryScoped[ParseResult]) -> RepositoryScoped[ResultT]:
+        return RepositoryScoped(
+            repository_id=item.repository_id,
+            result=extractor(item.result),
+        )
+
+    return _extract
+
+
+def _build_repository_graphs[ResultT](
+    repositories: tuple[SourceRepository, ...],
+    extraction_results: tuple[RepositoryScoped[ResultT], ...],
+    builder: Callable[[Sequence[ResultT]], ResultT],
+) -> ResultT | tuple[RepositoryGraph[ResultT], ...]:
+    """Build one graph per repository, including repositories with no parsed files."""
+    grouped: dict[UUID, list[ResultT]] = {repository.id: [] for repository in repositories}
+    for item in extraction_results:
+        grouped.setdefault(item.repository_id, []).append(item.result)
+    if len(grouped) <= 1:
+        only_results = next(iter(grouped.values()), [])
+        return builder(tuple(only_results))
+    return tuple(
+        RepositoryGraph(repository_id=repository_id, graph=builder(tuple(results)))
+        for repository_id, results in grouped.items()
+    )
 
 
 def _enumerate_files(workspaces: tuple[Path, ...]) -> tuple[tuple[str, str], ...]:
@@ -249,9 +357,10 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
         `clone_repositories`, `enumerate_files`, `parse_files`, `select_successful_parse_results`,
         `extract_imports`, `extract_ast`, `extract_symbols`, `extract_architecture`,
         `extract_interfaces`, `extract_foundation`, `build_architecture_graph`,
-        `build_dependency_graph`. `build_architecture_graph` reads `architecture_results`
-        unfiltered and writes `architecture_graph`; the last step, `build_dependency_graph`, reads
-        `import_results` unfiltered and writes `dependency_graph`.
+        `build_dependency_graph`. File, parse and extraction outputs retain repository UUIDs.
+        Both graph steps group inputs by UUID before calling the existing graph builder. For one
+        repository, each graph key retains its original graph type. For multiple repositories, each
+        graph key contains a tuple of `RepositoryGraph` values.
     """
     repository_client = build_repository_client(config)
     workspace_manager = build_workspace_manager(config)
@@ -265,75 +374,79 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
     )
     clone_step: Step = MapStep(
         "clone_repositories",
-        _clone_repository_func(repository_client, workspace_manager),
+        _clone_repository_scoped_func(repository_client, workspace_manager),
         input_key="repositories",
         output_key="workspaces",
         is_async=True,
     )
     enumerate_step: Step = CallableStep(
         "enumerate_files",
-        _enumerate_files,
+        _enumerate_repository_files,
         input_keys=("workspaces",),
         output_key="files_to_parse",
     )
     parse_step: Step = MapStep(
         "parse_files",
-        _parse_files_func(parsers),
+        _parse_repository_file_func(parsers),
         input_key="files_to_parse",
         output_key="parse_results",
     )
     select_successful_parse_results_step: Step = CallableStep(
         "select_successful_parse_results",
-        _select_successful_parse_results,
+        _select_successful_repository_parse_results,
         input_keys=("parse_results",),
         output_key="successful_parse_results",
     )
     extract_imports_step: Step = MapStep(
         "extract_imports",
-        StructuralImportExtractor().extract,
+        _extract_repository_result_func(StructuralImportExtractor().extract),
         input_key="successful_parse_results",
         output_key="import_results",
     )
     extract_ast_step: Step = MapStep(
         "extract_ast",
-        StructuralAstExtractor().extract,
+        _extract_repository_result_func(StructuralAstExtractor().extract),
         input_key="successful_parse_results",
         output_key="ast_results",
     )
     extract_symbols_step: Step = MapStep(
         "extract_symbols",
-        StructuralSymbolExtractor().extract,
+        _extract_repository_result_func(StructuralSymbolExtractor().extract),
         input_key="successful_parse_results",
         output_key="symbol_results",
     )
     extract_architecture_step: Step = MapStep(
         "extract_architecture",
-        StructuralArchitectureExtractor().extract,
+        _extract_repository_result_func(StructuralArchitectureExtractor().extract),
         input_key="successful_parse_results",
         output_key="architecture_results",
     )
     extract_interfaces_step: Step = MapStep(
         "extract_interfaces",
-        StructuralInterfaceExtractor().extract,
+        _extract_repository_result_func(StructuralInterfaceExtractor().extract),
         input_key="successful_parse_results",
         output_key="interface_results",
     )
     extract_foundation_step: Step = MapStep(
         "extract_foundation",
-        StructuralFoundationExtractor().extract,
+        _extract_repository_result_func(StructuralFoundationExtractor().extract),
         input_key="successful_parse_results",
         output_key="foundation_results",
     )
     build_architecture_graph_step: Step = CallableStep(
         "build_architecture_graph",
-        StructuralArchitectureGraphBuilder().build,
-        input_keys=("architecture_results",),
+        lambda repositories, results: _build_repository_graphs(
+            repositories, results, StructuralArchitectureGraphBuilder().build
+        ),
+        input_keys=("repositories", "architecture_results"),
         output_key="architecture_graph",
     )
     build_dependency_graph_step: Step = CallableStep(
         "build_dependency_graph",
-        StructuralDependencyGraphBuilder().build,
-        input_keys=("import_results",),
+        lambda repositories, results: _build_repository_graphs(
+            repositories, results, StructuralDependencyGraphBuilder().build
+        ),
+        input_keys=("repositories", "import_results"),
         output_key="dependency_graph",
     )
 
