@@ -1,6 +1,6 @@
 """Unit tests for `src.collectors.filesystem`."""
 
-import subprocess
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -36,12 +36,16 @@ async def test_collect_uses_the_current_branch_for_a_git_repository(tmp_path: Pa
     """A local Git repository should carry its checked-out branch into clone metadata."""
     target = tmp_path / "git-project"
     target.mkdir()
-    subprocess.run(
-        ["git", "init", "--initial-branch=develop"],
+    process = await asyncio.create_subprocess_exec(
+        "git",
+        "init",
+        "--initial-branch=develop",
         cwd=target,
-        check=True,
-        capture_output=True,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
+    _, stderr = await process.communicate()
+    assert process.returncode == 0, stderr.decode()
 
     result = await FilesystemCollector().collect(str(target))
 

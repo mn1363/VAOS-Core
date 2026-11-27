@@ -2189,8 +2189,8 @@ def test_e3_debug_records_follow_identifier_then_canonical_member_order(
     assert levels == [logging.WARNING, logging.DEBUG, logging.DEBUG]
     debug_messages = [message for level, message in log_capture.lines() if level == logging.DEBUG]
     assert debug_messages == [
-        "Coalesced capability:m.py::f (capability): 3 declaration(s); line_numbers=[4, 6, 8]; "
-        "is_public=[False, False, False]; has_docstring=[False, False, True]",
+        ("Coalesced capability:m.py::f (capability): 3 declaration(s); line_numbers=[4, 6, 8]; "
+         "is_public=[False, False, False]; has_docstring=[False, False, True]"),
         "Coalesced symbol:m.py::A.x (symbol): 2 declaration(s); line_numbers=[3, 7]",
     ]
 

@@ -927,7 +927,7 @@ def _log_coalescing(coalesced: Sequence[_CoalescedGroup]) -> None:
         if _logger.isEnabledFor(logging.DEBUG):
             for debug_format, debug_arguments in debug_records:
                 _logger.debug(debug_format, *debug_arguments)
-    except Exception:
+    except Exception:  # noqa: BLE001 - logging must not interrupt graph construction
         return
 
 

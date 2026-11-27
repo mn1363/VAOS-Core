@@ -6,17 +6,12 @@ concrete adapters implementing these Ports.
 """
 
 from abc import ABC, abstractmethod
-from typing import Generic, TypeVar
 from uuid import UUID
 
 from .entities import AnalysisRun, Finding, SourceFile, SourceRepository
 
-#: Generic type variable representing the entity type a `Repository` Port
-#: persists.
-EntityT = TypeVar("EntityT")
 
-
-class Repository(ABC, Generic[EntityT]):
+class Repository[EntityT](ABC):
     """Abstract persistence Port for a single entity type.
 
     Type Parameters:

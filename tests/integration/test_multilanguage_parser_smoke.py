@@ -6,7 +6,6 @@ They are smoke fixtures, not a substitute for validation against independent pub
 """
 
 import pytest
-
 from src.parsers.base import Parser
 from src.parsers.cpp.parser import CppParser
 from src.parsers.go.parser import GoParser
@@ -21,12 +20,12 @@ from src.parsers.typescript.parser import TypeScriptParser
         (
             PythonParser(),
             "src/service.py",
-            "from pathlib import Path\n\n"
-            "class Project:\n"
-            "    def load_config(self, path: Path) -> str:\n"
-            "        return path.read_text()\n\n"
-            "def normalize(value: str) -> str:\n"
-            "    return value.strip()\n",
+            ("from pathlib import Path\n\n"
+             "class Project:\n"
+             "    def load_config(self, path: Path) -> str:\n"
+             "        return path.read_text()\n\n"
+             "def normalize(value: str) -> str:\n"
+             "    return value.strip()\n"),
             "Project",
             "normalize",
             "pathlib",
@@ -34,11 +33,11 @@ from src.parsers.typescript.parser import TypeScriptParser
         (
             TypeScriptParser(),
             "src/service.ts",
-            'import { readFile } from "node:fs/promises";\n'
-            "export class UserService {\n"
-            "  async getUser(id: string): Promise<string> { return id; }\n"
-            "}\n"
-            "export function normalize(input: string): string { return input.trim(); }\n",
+            ('import { readFile } from "node:fs/promises";\n'
+             "export class UserService {\n"
+             "  async getUser(id: string): Promise<string> { return id; }\n"
+             "}\n"
+             "export function normalize(input: string): string { return input.trim(); }\n"),
             "UserService",
             "normalize",
             "node:fs/promises",
@@ -46,10 +45,10 @@ from src.parsers.typescript.parser import TypeScriptParser
         (
             GoParser(),
             "internal/point.go",
-            'package geometry\nimport "fmt"\n'
-            "type Point struct { X int; Y int }\n"
-            "func (p *Point) Move(dx int) { p.X += dx }\n"
-            "func Add(a int, b int) int { return a + b }\n",
+            ('package geometry\nimport "fmt"\n'
+             "type Point struct { X int; Y int }\n"
+             "func (p *Point) Move(dx int) { p.X += dx }\n"
+             "func Add(a int, b int) int { return a + b }\n"),
             "Point",
             "Add",
             "fmt",
@@ -57,10 +56,10 @@ from src.parsers.typescript.parser import TypeScriptParser
         (
             RustParser(),
             "src/point.rs",
-            "use std::fmt;\n"
-            "pub struct Point { x: f64, y: f64 }\n"
-            "impl Point { pub fn new(x: f64, y: f64) -> Self { Self { x, y } } }\n"
-            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+            ("use std::fmt;\n"
+             "pub struct Point { x: f64, y: f64 }\n"
+             "impl Point { pub fn new(x: f64, y: f64) -> Self { Self { x, y } } }\n"
+             "pub fn add(a: i32, b: i32) -> i32 { a + b }\n"),
             "Point",
             "add",
             "std",
@@ -68,11 +67,11 @@ from src.parsers.typescript.parser import TypeScriptParser
         (
             CppParser(),
             "src/point.cpp",
-            "#include <vector>\n"
-            "namespace geometry {\n"
-            "class Point { public: Point(double x, double y); };\n"
-            "int add(int a, int b) { return a + b; }\n"
-            "}\n",
+            ("#include <vector>\n"
+             "namespace geometry {\n"
+             "class Point { public: Point(double x, double y); };\n"
+             "int add(int a, int b) { return a + b; }\n"
+             "}\n"),
             "Point",
             "add",
             "vector",

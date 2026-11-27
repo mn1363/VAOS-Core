@@ -34,8 +34,8 @@ from ..base import (
     ParsedClass,
     ParsedExport,
     ParsedFunction,
-    ParsedInterface,
     ParsedImport,
+    ParsedInterface,
     ParsedModule,
     ParsedProperty,
     ParsedSymbol,
@@ -473,9 +473,8 @@ def _compute_opaque_depths(scan: str, namespace_opens: set[int]) -> list[int]:
             stack.append(is_opaque)
             if is_opaque:
                 opaque_depth += 1
-        elif character == "}" and stack:
-            if stack.pop():
-                opaque_depth -= 1
+        elif character == "}" and stack and stack.pop():
+            opaque_depth -= 1
     depths[len(scan)] = opaque_depth
     return depths
 
@@ -702,13 +701,15 @@ def _split_members(structural_scan: str, start: int, end: int) -> list[tuple[int
         elif character == ">":
             if structural_scan[index - 1] != "=":
                 angle = max(0, angle - 1)
-        elif nesting == 0 and angle == 0:
-            if character in ";," or (
+        elif nesting == 0 and angle == 0 and (
+            character in ";,"
+            or (
                 character == "\n"
                 and _ends_member_at_newline(structural_scan, member_start, index, end)
-            ):
-                spans.append((member_start, index))
-                member_start = index + 1
+            )
+        ):
+            spans.append((member_start, index))
+            member_start = index + 1
     spans.append((member_start, end))
     return spans
 
