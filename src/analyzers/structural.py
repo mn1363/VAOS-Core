@@ -11,6 +11,7 @@ from src.analyzers.architecture.base import (
     ArchitectureAnalysisResult,
     ArchitectureAnalyzer,
     ArchitectureAssessment,
+    ArchitectureMemoryCheck,
 )
 from src.analyzers.architecture.base import (
     require_successful_extraction as require_architecture,
@@ -87,6 +88,9 @@ from src.extractors.ast.base import AstExtractionResult
 from src.extractors.foundation.base import FoundationExtractionResult
 from src.extractors.imports.base import ImportExtractionResult
 from src.extractors.symbols.base import ExtractedSymbolKind, SymbolExtractionResult
+from src.memory.base import MemoryRecord
+from src.memory.contracts import ArchitectureMemoryContent
+from src.memory.policy import select_memory_for_analyzer
 
 ExtractionT = TypeVar(
     "ExtractionT",
@@ -127,6 +131,37 @@ class StructuralArchitectureAnalyzer(ArchitectureAnalyzer):
                 declared_module_count=len(unit.declared_modules),
             ),
         )
+
+    def analyze_with_memory(
+        self,
+        extraction_result: ArchitectureExtractionResult,
+        memory_records: tuple[MemoryRecord, ...],
+    ) -> ArchitectureAnalysisResult:
+        """Compare observed placement with eligible memory; never create findings."""
+        result = self.analyze(extraction_result)
+        if not result.succeeded or result.assessment is None:
+            return result
+        eligible = select_memory_for_analyzer(memory_records, analyzer="architecture")
+        checks: list[ArchitectureMemoryCheck] = []
+        for record in eligible:
+            content = ArchitectureMemoryContent.from_record(record)
+            if content is None:
+                continue
+            checks.append(
+                ArchitectureMemoryCheck(
+                    memory_record_id=record.id,
+                    expected_package_path=content.expected_package_path,
+                    matches=result.assessment.package_path == content.expected_package_path,
+                )
+            )
+        assessment = ArchitectureAssessment(
+            relative_path=result.assessment.relative_path,
+            package_path=result.assessment.package_path,
+            is_package_root=result.assessment.is_package_root,
+            declared_module_count=result.assessment.declared_module_count,
+            memory_checks=tuple(checks),
+        )
+        return ArchitectureAnalysisResult.ok(relative_path=result.relative_path, assessment=assessment)
 
 
 class StructuralComplexityAnalyzer(ComplexityAnalyzer):

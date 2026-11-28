@@ -6,6 +6,8 @@ import asyncio
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -27,6 +29,35 @@ class FilesystemMemoryStore(MemoryStore):
         self._lock = asyncio.Lock()
         self._closed = False
         self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    @contextmanager
+    def _process_lock(self) -> Iterator[None]:
+        """Lock mutations across store instances and processes on the same host."""
+        lock_path = self._path.with_suffix(self._path.suffix + ".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+b") as lock_file:
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+                try:
+                    yield
+                finally:
+                    lock_file.seek(0)
+                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)  # type: ignore[attr-defined]
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
 
     def _read_sync(self) -> dict[str, dict[str, Any]]:
         if not self._path.exists():
@@ -76,10 +107,81 @@ class FilesystemMemoryStore(MemoryStore):
 
     async def upsert(self, record: MemoryRecord) -> None:
         self._ensure_open()
+
+        def _upsert() -> None:
+            with self._process_lock():
+                data = self._read_sync()
+                data[str(record.id)] = memory_record_to_dict(record)
+                self._write_sync(data)
+
         async with self._lock:
-            data = await asyncio.to_thread(self._read_sync)
-            data[str(record.id)] = memory_record_to_dict(record)
-            await asyncio.to_thread(self._write_sync, data)
+            await asyncio.to_thread(_upsert)
+
+    async def create_if_no_active_scope_conflict(self, record: MemoryRecord) -> bool:
+        """Atomically check active scope and insert under the instance lock."""
+        self._ensure_open()
+        def _create() -> bool:
+            with self._process_lock():
+                data = self._read_sync()
+                current = data.get(str(record.id))
+                if current is not None:
+                    if memory_record_from_dict(current) == record:
+                        return True
+                    raise ValueError("memory record id already exists with different content")
+                scope = (
+                    record.memory_type, record.entity_id,
+                    record.content.get("expected_package_path"),
+                )
+                for item in data.values():
+                    candidate = memory_record_from_dict(item)
+                    if candidate.metadata.get("status") != "active":
+                        continue
+                    candidate_scope = (
+                        candidate.memory_type, candidate.entity_id,
+                        candidate.content.get("expected_package_path"),
+                    )
+                    if candidate_scope == scope:
+                        return False
+                updated = dict(data)
+                updated[str(record.id)] = memory_record_to_dict(record)
+                self._write_sync(updated)
+                return True
+
+        async with self._lock:
+            return await asyncio.to_thread(_create)
+
+    async def atomic_replace(
+        self, expected: MemoryRecord, updates: tuple[MemoryRecord, ...]
+    ) -> bool:
+        """Compare and replace a group in one atomic JSON-file rewrite.
+
+        The asyncio lock protects callers that share this store instance. It does not
+        coordinate separate processes or separate store instances.
+        """
+        self._ensure_open()
+        def _replace() -> bool:
+            with self._process_lock():
+                data = self._read_sync()
+                current = data.get(str(expected.id))
+                if current is None or memory_record_from_dict(current) != expected:
+                    return False
+                update_ids = [str(record.id) for record in updates]
+                if len(update_ids) != len(set(update_ids)):
+                    raise ValueError("atomic replacement contains duplicate record ids")
+                if any(
+                    record_id != str(expected.id) and record_id in data
+                    for record_id in update_ids
+                ):
+                    raise ValueError("atomic replacement target id already exists")
+                updated = dict(data)
+                updated.pop(str(expected.id), None)
+                for record in updates:
+                    updated[str(record.id)] = memory_record_to_dict(record)
+                self._write_sync(updated)
+                return True
+
+        async with self._lock:
+            return await asyncio.to_thread(_replace)
 
     async def get(self, record_id: UUID) -> MemoryRecord | None:
         self._ensure_open()
@@ -90,10 +192,14 @@ class FilesystemMemoryStore(MemoryStore):
 
     async def delete(self, record_id: UUID) -> None:
         self._ensure_open()
+        def _delete() -> None:
+            with self._process_lock():
+                data = self._read_sync()
+                if data.pop(str(record_id), None) is not None:
+                    self._write_sync(data)
+
         async with self._lock:
-            data = await asyncio.to_thread(self._read_sync)
-            if data.pop(str(record_id), None) is not None:
-                await asyncio.to_thread(self._write_sync, data)
+            await asyncio.to_thread(_delete)
 
     async def exists(self, record_id: UUID) -> bool:
         self._ensure_open()

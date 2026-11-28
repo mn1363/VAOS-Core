@@ -217,6 +217,24 @@ class MemoryStore(ABC):
         """
         ...
 
+    async def create_if_no_active_scope_conflict(self, record: MemoryRecord) -> bool:
+        """Insert an active scoped record unless an active record already owns its scope.
+
+        The operation must be atomic within the backing store. Returns False on a
+        scope conflict. Repeating the exact same record ID and value is idempotent.
+        """
+        raise NotImplementedError("this MemoryStore does not support atomic scoped creation")
+
+    async def atomic_replace(
+        self, expected: MemoryRecord, updates: tuple[MemoryRecord, ...]
+    ) -> bool:
+        """Atomically replace records only when the stored expected value is unchanged.
+
+        Concrete stores must implement this operation. It is used for audited lifecycle
+        transitions, where partial writes are not acceptable.
+        """
+        raise NotImplementedError("this MemoryStore does not support atomic replacement")
+
     @abstractmethod
     async def get(self, record_id: UUID) -> MemoryRecord | None:
         """Retrieve a single memory record by its own `id`.

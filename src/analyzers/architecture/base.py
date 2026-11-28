@@ -17,12 +17,22 @@ a repository as a whole.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from uuid import UUID
 
 from src.core.exceptions import ValidationError
 from src.core.logging import get_logger
 from src.extractors.architecture.base import ArchitectureExtractionResult
 
 _logger = get_logger("analyzers.architecture")
+
+
+@dataclass(frozen=True, slots=True)
+class ArchitectureMemoryCheck:
+    """Advisory comparison between observed placement and one approved memory record."""
+
+    memory_record_id: UUID
+    expected_package_path: tuple[str, ...]
+    matches: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,12 +47,15 @@ class ArchitectureAssessment:
             package, carried through from the originating `PackageUnit`.
         declared_module_count: Number of nested module/namespace declarations the file itself
             contains, carried through as a count from `PackageUnit.declared_modules`.
+        memory_checks: Advisory comparisons with eligible, explicitly scoped architecture
+            memory. These checks never alter the extracted source facts or create findings.
     """
 
     relative_path: str
     package_path: tuple[str, ...]
     is_package_root: bool = False
     declared_module_count: int = 0
+    memory_checks: tuple[ArchitectureMemoryCheck, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate that `declared_module_count` is non-negative.

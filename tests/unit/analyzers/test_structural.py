@@ -1,5 +1,7 @@
 """Tests for concrete structural analyzer implementations."""
 
+from uuid import uuid4
+
 import pytest
 from src.analyzers.structural import (
     StructuralArchitectureAnalyzer,
@@ -17,6 +19,7 @@ from src.extractors.ast.structural import StructuralAstExtractor
 from src.extractors.foundation.structural import StructuralFoundationExtractor
 from src.extractors.imports.structural import StructuralImportExtractor
 from src.extractors.symbols.structural import StructuralSymbolExtractor
+from src.memory.contracts import create_architecture_memory_record
 from src.parsers.python.parser import PythonParser
 
 _SOURCE = '''"""Module documentation."""
@@ -61,6 +64,55 @@ def test_structural_architecture_analyzer_uses_extracted_package_facts() -> None
     assert result.assessment.relative_path == "tests/test_sample.py"
     assert result.assessment.package_path == ("tests",)
     assert result.assessment.is_package_root is False
+
+
+def test_structural_architecture_analyzer_checks_explicit_memory_without_changing_source_facts() -> None:
+    extraction = StructuralArchitectureExtractor().extract(_parse())
+    matching = create_architecture_memory_record(
+        record_id=uuid4(), memory_type="architecture_constraint", expected_package_path=("tests",),
+        approved_by="project_owner",
+        approval_source="user_instruction",
+        approval_reference="test-fixture",
+    )
+    mismatch = create_architecture_memory_record(
+        record_id=uuid4(), memory_type="architecture_decision", expected_package_path=("src", "application"),
+        approved_by="project_owner",
+        approval_source="user_instruction",
+        approval_reference="test-fixture",
+    )
+
+    result = StructuralArchitectureAnalyzer().analyze_with_memory(extraction, (mismatch, matching))
+
+    assert result.succeeded
+    assert result.assessment is not None
+    assert result.assessment.package_path == ("tests",)
+    checks = {check.memory_record_id: check.matches for check in result.assessment.memory_checks}
+    assert checks == {matching.id: True, mismatch.id: False}
+
+
+def test_structural_architecture_analyzer_ignores_inactive_or_malformed_memory() -> None:
+    extraction = StructuralArchitectureExtractor().extract(_parse())
+    active = create_architecture_memory_record(
+        record_id=uuid4(), memory_type="architecture_constraint", expected_package_path=("tests",),
+        approved_by="project_owner",
+        approval_source="user_instruction",
+        approval_reference="test-fixture",
+    )
+    inactive = type(active)(
+        id=active.id, memory_type=active.memory_type, content=active.content,
+        metadata={**active.metadata, "status": "inactive"},
+    )
+    malformed = type(active)(
+        id=uuid4(), memory_type="architecture_constraint",
+        content={"expected_package_path": ["tests", "", 3]},
+        metadata={"status": "active", "confidence": 0.99, "analysis_scopes": ["architecture"]},
+    )
+
+    result = StructuralArchitectureAnalyzer().analyze_with_memory(extraction, (inactive, malformed))
+
+    assert result.succeeded
+    assert result.assessment is not None
+    assert result.assessment.memory_checks == ()
 
 
 def test_structural_complexity_analyzer_computes_structural_ratios() -> None:

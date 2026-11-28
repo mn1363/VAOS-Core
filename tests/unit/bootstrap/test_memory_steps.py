@@ -5,9 +5,13 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from src.bootstrap.memory_steps import build_memory_aware_step
+from src.bootstrap.memory_steps import (
+    build_architecture_memory_persistence_step,
+    build_memory_aware_step,
+)
 from src.domain.entities import RepositoryProvider, SourceRepository
 from src.memory.base import MemoryRecord
+from src.memory.contracts import create_architecture_memory_record
 from src.pipeline.context import PipelineContext
 from src.pipeline.steps import CallableStep
 from src.storage.filesystem.memory import FilesystemMemoryStore
@@ -66,3 +70,66 @@ def test_retrieval_step_rejects_non_positive_limit(tmp_path: Path) -> None:
         build_memory_aware_step(
             CallableStep("noop", lambda: None, output_key="unused"), store, limit_per_scope=0
         )
+
+
+@pytest.mark.asyncio
+async def test_persistence_step_stores_only_explicit_approved_memory_before_retrieval(tmp_path: Path) -> None:
+    store = FilesystemMemoryStore(tmp_path)
+    repository = SourceRepository(
+        name="vaos", source_uri="/tmp/vaos", provider=RepositoryProvider.FILESYSTEM
+    )
+    record = create_architecture_memory_record(
+        record_id=uuid4(),
+        approved_by="project_owner",
+        approval_source="user_instruction",
+        approval_reference="test-fixture",
+        memory_type="architecture_constraint",
+        expected_package_path=("src", "domain"),
+        entity_id=repository.id,
+    )
+    context = PipelineContext(
+        values={
+            "repositories": (repository,),
+            "architecture_memory_records_to_persist": (record,),
+        }
+    )
+
+    persist_step = build_architecture_memory_persistence_step(store)
+    await persist_step.execute(context)
+    # Repeating the same step is an idempotent upsert, not a duplicate insert.
+    await persist_step.execute(context)
+    retrieval_step = build_memory_aware_step(
+        CallableStep("analysis_consumer", lambda: None, output_key="consumer_ran"), store
+    )
+    await retrieval_step.execute(context)
+
+    assert context.require("persisted_architecture_memory_ids") == (record.id,)
+    assert await store.get(record.id) == record
+    assert context.require("memory_records_by_repository")[repository.id] == (record,)
+    await store.aclose()
+
+
+@pytest.mark.asyncio
+async def test_persistence_step_rejects_unapproved_memory_without_writing(tmp_path: Path) -> None:
+    store = FilesystemMemoryStore(tmp_path)
+    record = create_architecture_memory_record(
+        record_id=uuid4(),
+        approved_by="project_owner",
+        approval_source="user_instruction",
+        approval_reference="test-fixture",
+        memory_type="architecture_constraint",
+        expected_package_path=("src",),
+    )
+    inactive = MemoryRecord(
+        id=record.id,
+        memory_type=record.memory_type,
+        content=record.content,
+        metadata={**record.metadata, "status": "inactive"},
+    )
+    context = PipelineContext(values={"architecture_memory_records_to_persist": (inactive,)})
+
+    with pytest.raises(ValueError, match="is not eligible"):
+        await build_architecture_memory_persistence_step(store).execute(context)
+
+    assert await store.get(record.id) is None
+    await store.aclose()

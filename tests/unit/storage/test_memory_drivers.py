@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -40,6 +42,10 @@ class FakePostgresConnection:
     def __init__(self) -> None:
         self.records: dict[str, dict[str, Any]] = {}
 
+    @asynccontextmanager
+    async def transaction(self):
+        yield
+
     async def execute(self, query: str, *args: Any, timeout: float | None = None) -> str:
         del timeout
         if query.startswith("INSERT INTO memory_records"):
@@ -57,6 +63,8 @@ class FakePostgresConnection:
         if query.startswith("DELETE FROM memory_records"):
             self.records.pop(str(args[0]), None)
             return "DELETE 1"
+        if query.startswith("SELECT pg_advisory_xact_lock"):
+            return "SELECT 1"
         raise AssertionError(f"unexpected SQL: {query}")
 
     async def fetchrow(
@@ -69,10 +77,39 @@ class FakePostgresConnection:
         return dict(record) if record is not None else None
 
     async def fetch(self, query: str, *args: Any, timeout: float | None = None) -> list[Any]:
-        del args, timeout
+        del timeout
         if query == "SELECT * FROM memory_records":
             return [dict(record) for record in self.records.values()]
+        if "WHERE memory_type = $1 AND entity_id IS NOT DISTINCT FROM $2" in query:
+            return [
+                dict(record) for record in self.records.values()
+                if record["memory_type"] == args[0] and record["entity_id"] == args[1]
+            ]
         raise AssertionError(f"unexpected SQL: {query}")
+
+
+def _filesystem_create_worker(
+    root: str, record: MemoryRecord, result_queue: Any
+) -> None:
+    async def _run() -> None:
+        store = FilesystemMemoryStore(Path(root))
+        result_queue.put(await store.create_if_no_active_scope_conflict(record))
+        await store.aclose()
+
+    __import__("asyncio").run(_run())
+
+
+def make_scoped_architecture_record(record_id: UUID, *, path: tuple[str, ...]) -> MemoryRecord:
+    now = datetime.now(UTC)
+    return MemoryRecord(
+        id=record_id,
+        memory_type="architecture_decision",
+        content={"expected_package_path": list(path)},
+        metadata={"status": "active", "confidence": 0.95, "analysis_scopes": ["architecture"]},
+        entity_id=ENTITY_ID,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 async def assert_memory_contract(store: Any) -> None:
@@ -199,3 +236,120 @@ async def test_build_storage_constructs_memory_store_for_filesystem_and_sqlite(
     assert isinstance(sqlite.memory_store, SqliteMemoryStore)
     assert sqlite.resource is not None
     await sqlite.resource.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_atomic_memory_replace_is_compare_and_swap(tmp_path: Path) -> None:
+    connection = open_connection(str(tmp_path / "atomic-memory.db"))
+    try:
+        await initialize_schema(connection)
+        store = SqliteMemoryStore(connection)
+        original = make_record(uuid4())
+        replacement = make_record(uuid4(), label="replacement")
+        superseded = MemoryRecord(
+            id=original.id,
+            memory_type=original.memory_type,
+            content=dict(original.content),
+            metadata={**original.metadata, "status": "superseded"},
+            entity_id=original.entity_id,
+            created_at=original.created_at,
+            updated_at=datetime.now(UTC),
+        )
+        await store.upsert(original)
+        assert await store.atomic_replace(original, (superseded, replacement))
+        assert await store.get(original.id) == superseded
+        assert await store.get(replacement.id) == replacement
+        assert not await store.atomic_replace(original, (original,))
+    finally:
+        await close_connection(connection)
+
+
+@pytest.mark.asyncio
+async def test_postgres_atomic_memory_replace_uses_transaction() -> None:
+    store = PostgresMemoryStore(FakePostgresConnection())
+    original = make_record(uuid4())
+    replacement = make_record(uuid4(), label="replacement")
+    superseded = MemoryRecord(
+        id=original.id,
+        memory_type=original.memory_type,
+        content=dict(original.content),
+        metadata={**original.metadata, "status": "superseded"},
+        entity_id=original.entity_id,
+        created_at=original.created_at,
+        updated_at=datetime.now(UTC),
+    )
+    await store.upsert(original)
+    assert await store.atomic_replace(original, (superseded, replacement))
+    assert await store.get(original.id) == superseded
+    assert await store.get(replacement.id) == replacement
+    assert not await store.atomic_replace(original, (original,))
+
+
+@pytest.mark.asyncio
+async def test_filesystem_scoped_create_rejects_concurrent_conflict(tmp_path: Path) -> None:
+    store = FilesystemMemoryStore(tmp_path)
+    first = make_scoped_architecture_record(uuid4(), path=("src", "domain"))
+    second = make_scoped_architecture_record(uuid4(), path=("src", "domain"))
+    results = await __import__("asyncio").gather(
+        store.create_if_no_active_scope_conflict(first),
+        store.create_if_no_active_scope_conflict(second),
+    )
+    assert sorted(results) == [False, True]
+    winner = first if await store.exists(first.id) else second
+    assert await store.create_if_no_active_scope_conflict(winner)
+
+
+def test_filesystem_scoped_create_is_safe_across_processes(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    first = make_scoped_architecture_record(uuid4(), path=("src", "domain"))
+    second = make_scoped_architecture_record(uuid4(), path=("src", "domain"))
+    processes = [
+        context.Process(
+            target=_filesystem_create_worker,
+            args=(str(tmp_path), record, result_queue),
+        )
+        for record in (first, second)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=20)
+    try:
+        assert [process.exitcode for process in processes] == [0, 0]
+        assert sorted([result_queue.get(timeout=2), result_queue.get(timeout=2)]) == [False, True]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        result_queue.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_scoped_create_rejects_concurrent_conflict(tmp_path: Path) -> None:
+    connection = open_connection(str(tmp_path / "scoped-memory.db"))
+    try:
+        await initialize_schema(connection)
+        store = SqliteMemoryStore(connection)
+        first = make_scoped_architecture_record(uuid4(), path=("src", "domain"))
+        second = make_scoped_architecture_record(uuid4(), path=("src", "domain"))
+        results = await __import__("asyncio").gather(
+            store.create_if_no_active_scope_conflict(first),
+            store.create_if_no_active_scope_conflict(second),
+        )
+        assert sorted(results) == [False, True]
+        winner = first if await store.exists(first.id) else second
+        assert await store.create_if_no_active_scope_conflict(winner)
+    finally:
+        await close_connection(connection)
+
+
+@pytest.mark.asyncio
+async def test_postgres_scoped_create_rejects_conflict_and_is_idempotent() -> None:
+    store = PostgresMemoryStore(FakePostgresConnection())
+    first = make_scoped_architecture_record(uuid4(), path=("src", "domain"))
+    second = make_scoped_architecture_record(uuid4(), path=("src", "domain"))
+    assert await store.create_if_no_active_scope_conflict(first)
+    assert not await store.create_if_no_active_scope_conflict(second)
+    assert await store.create_if_no_active_scope_conflict(first)
