@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from src.memory.base import MemoryQuery, MemoryQueryResult, MemoryRecord, MemoryStore
@@ -42,7 +43,7 @@ class FilesystemMemoryStore(MemoryStore):
                 lock_file.flush()
             lock_file.seek(0)
             if os.name == "nt":
-                import msvcrt
+                msvcrt = cast(Any, importlib.import_module('msvcrt'))
 
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
                 try:
@@ -51,13 +52,13 @@ class FilesystemMemoryStore(MemoryStore):
                     lock_file.seek(0)
                     msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
             else:
-                import fcntl
+                fcntl = cast(Any, importlib.import_module('fcntl'))
 
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)  # type: ignore[attr-defined]
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
                 try:
                     yield
                 finally:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _read_sync(self) -> dict[str, dict[str, Any]]:
         if not self._path.exists():
