@@ -84,6 +84,8 @@ from src.extractors.interfaces.structural import StructuralInterfaceExtractor
 from src.extractors.symbols.structural import StructuralSymbolExtractor
 from src.graph.architecture.structural import StructuralArchitectureGraphBuilder
 from src.graph.dependency.structural import StructuralDependencyGraphBuilder
+from src.memory.base import MemoryRecord
+from src.memory.policy import select_memory_for_analyzer
 from src.parsers.base import Parser, ParseResult
 from src.parsers.cpp.parser import CppParser
 from src.parsers.go.parser import GoParser
@@ -270,22 +272,60 @@ def _extract_repository_result_func[ResultT](
 
 
 def _analyze_repository_result_func[ExtractionT, AnalysisT](
-    analyzer: Callable[[ExtractionT], AnalysisT],
+    analyzer: Any,
     failed: Callable[..., AnalysisT],
-) -> Callable[[RepositoryScoped[ExtractionT]], RepositoryScoped[AnalysisT]]:
-    """Adapt a per-file analyzer while retaining repository identity and local failures."""
+    *,
+    analyzer_scope: str,
+) -> Callable[
+    [RepositoryScoped[ExtractionT], tuple[MemoryRecord, ...]],
+    RepositoryScoped[AnalysisT],
+]:
+    """Adapt an analyzer and pass repository-scoped memory when it supports that contract."""
 
     def _analyze(
-        item: RepositoryScoped[ExtractionT],
+        item: RepositoryScoped[ExtractionT], memory_records: tuple[MemoryRecord, ...]
     ) -> RepositoryScoped[AnalysisT]:
+        scoped_memory = select_memory_for_analyzer(memory_records, analyzer=analyzer_scope)
+        analyze_with_memory = getattr(analyzer, "analyze_with_memory", None)
+        if callable(analyze_with_memory):
+            analyze = lambda extraction: analyze_with_memory(extraction, scoped_memory)
+        else:
+            analyze = analyzer if callable(analyzer) else analyzer.analyze
         return RepositoryScoped(
             repository_id=item.repository_id,
             result=analyze_repository_result(
-                item.result, cast(_HasRelativePath, item.result).relative_path, analyzer, failed
+                item.result, cast(_HasRelativePath, item.result).relative_path, analyze, failed
             ),
         )
 
     return _analyze
+
+
+class _MemoryAwareAnalysisMapStep(MapStep):
+    """Map an analyzer over files with memory limited to each file's owning repository."""
+
+    def __init__(
+        self,
+        name: str,
+        func: Callable[[RepositoryScoped[Any], tuple[MemoryRecord, ...]], RepositoryScoped[Any]],
+        *,
+        input_key: str,
+        output_key: str,
+    ) -> None:
+        super().__init__(name, lambda item: item, input_key=input_key, output_key=output_key)
+        self._memory_func = func
+
+    async def execute(self, context: PipelineContext) -> PipelineContext:
+        items: Sequence[RepositoryScoped[Any]] = context.require(self._input_key)
+        memory_by_repository: Mapping[UUID, tuple[MemoryRecord, ...]] = context.get(
+            "memory_records_by_repository", {}
+        )
+        outputs = tuple(
+            self._memory_func(item, memory_by_repository.get(item.repository_id, ()))
+            for item in items
+        )
+        context.set(self._output_key, outputs)
+        return context
 
 
 def _build_repository_graphs[ResultT](
@@ -405,10 +445,18 @@ def _persist_analysis_artifacts_func(
 ) -> Callable[..., Awaitable[tuple[UUID, ...]]]:
     """Bind the artifact store into the final persistence step."""
     artifact_sources = (
-        ("architecture_analysis_results", "architecture.analysis", "StructuralArchitectureAnalyzer"),
+        (
+            "architecture_analysis_results",
+            "architecture.analysis",
+            "StructuralArchitectureAnalyzer",
+        ),
         ("complexity_analysis_results", "complexity.analysis", "StructuralComplexityAnalyzer"),
         ("dependency_analysis_results", "dependency.analysis", "StructuralDependencyAnalyzer"),
-        ("documentation_analysis_results", "documentation.analysis", "StructuralDocumentationAnalyzer"),
+        (
+            "documentation_analysis_results",
+            "documentation.analysis",
+            "StructuralDocumentationAnalyzer",
+        ),
         ("metrics_analysis_results", "metrics.analysis", "StructuralMetricsAnalyzer"),
         ("quality_analysis_results", "quality.analysis", "StructuralQualityAnalyzer"),
         ("security_analysis_results", "security.analysis", "StructuralSecurityAnalyzer"),
@@ -426,8 +474,7 @@ def _persist_analysis_artifacts_func(
                 analysis_run_id = analysis_run_ids.get(scoped_result.repository_id)
                 if analysis_run_id is None:
                     raise ValueError(
-                        "missing AnalysisRun ID for repository "
-                        f"{scoped_result.repository_id}"
+                        f"missing AnalysisRun ID for repository {scoped_result.repository_id}"
                     )
                 result = scoped_result.result
                 if not is_dataclass(result):
@@ -557,59 +604,69 @@ def build_analysis_steps(config: AppConfig) -> list[Step]:
         input_key="successful_parse_results",
         output_key="foundation_results",
     )
-    analyze_architecture_step: Step = MapStep(
+    analyze_architecture_step: Step = _MemoryAwareAnalysisMapStep(
         "analyze_architecture",
         _analyze_repository_result_func(
-            architecture_analyzer.analyze, ArchitectureAnalysisResult.failed
+            architecture_analyzer, ArchitectureAnalysisResult.failed, analyzer_scope="architecture"
         ),
         input_key="architecture_results",
         output_key="architecture_analysis_results",
     )
-    analyze_complexity_step: Step = MapStep(
+    analyze_complexity_step: Step = _MemoryAwareAnalysisMapStep(
         "analyze_complexity",
         _analyze_repository_result_func(
-            complexity_analyzer.analyze, ComplexityAnalysisResult.failed
+            complexity_analyzer, ComplexityAnalysisResult.failed, analyzer_scope="complexity"
         ),
         input_key="ast_results",
         output_key="complexity_analysis_results",
     )
-    analyze_dependencies_step: Step = MapStep(
+    analyze_dependencies_step: Step = _MemoryAwareAnalysisMapStep(
         "analyze_dependencies",
         _analyze_repository_result_func(
-            dependency_analyzer.analyze, DependencyAnalysisResult.failed
+            dependency_analyzer, DependencyAnalysisResult.failed, analyzer_scope="dependency"
         ),
         input_key="import_results",
         output_key="dependency_analysis_results",
     )
-    analyze_documentation_step: Step = MapStep(
+    analyze_documentation_step: Step = _MemoryAwareAnalysisMapStep(
         "analyze_documentation",
         _analyze_repository_result_func(
-            documentation_analyzer.analyze, DocumentationAnalysisResult.failed
+            documentation_analyzer,
+            DocumentationAnalysisResult.failed,
+            analyzer_scope="documentation",
         ),
         input_key="ast_results",
         output_key="documentation_analysis_results",
     )
-    analyze_metrics_step: Step = MapStep(
+    analyze_metrics_step: Step = _MemoryAwareAnalysisMapStep(
         "analyze_metrics",
-        _analyze_repository_result_func(metrics_analyzer.analyze, MetricsAnalysisResult.failed),
+        _analyze_repository_result_func(
+            metrics_analyzer, MetricsAnalysisResult.failed, analyzer_scope="metrics"
+        ),
         input_key="ast_results",
         output_key="metrics_analysis_results",
     )
-    analyze_quality_step: Step = MapStep(
+    analyze_quality_step: Step = _MemoryAwareAnalysisMapStep(
         "analyze_quality",
-        _analyze_repository_result_func(quality_analyzer.analyze, QualityAnalysisResult.failed),
+        _analyze_repository_result_func(
+            quality_analyzer, QualityAnalysisResult.failed, analyzer_scope="quality"
+        ),
         input_key="foundation_results",
         output_key="quality_analysis_results",
     )
-    analyze_security_step: Step = MapStep(
+    analyze_security_step: Step = _MemoryAwareAnalysisMapStep(
         "analyze_security",
-        _analyze_repository_result_func(security_analyzer.analyze, SecurityAnalysisResult.failed),
+        _analyze_repository_result_func(
+            security_analyzer, SecurityAnalysisResult.failed, analyzer_scope="security"
+        ),
         input_key="import_results",
         output_key="security_analysis_results",
     )
-    analyze_tests_step: Step = MapStep(
+    analyze_tests_step: Step = _MemoryAwareAnalysisMapStep(
         "analyze_tests",
-        _analyze_repository_result_func(tests_analyzer.analyze, TestsAnalysisResult.failed),
+        _analyze_repository_result_func(
+            tests_analyzer, TestsAnalysisResult.failed, analyzer_scope="tests"
+        ),
         input_key="symbol_results",
         output_key="tests_analysis_results",
     )

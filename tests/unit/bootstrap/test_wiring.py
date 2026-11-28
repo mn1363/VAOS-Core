@@ -315,6 +315,8 @@ async def test_build_application_appends_extra_steps(tmp_path: Any) -> None:
             return "record"
 
         async def execute(self, context: PipelineContext) -> PipelineContext:
+            assert context.has("memory_records_by_repository")
+            assert context.has("project_memory_records")
             log.append("ran")
             return context
 
@@ -327,7 +329,12 @@ async def test_build_application_appends_extra_steps(tmp_path: Any) -> None:
     pipeline = await build_application(config, extra_steps=[_RecordingStep()])
     context = PipelineContext(values={"source": str(tmp_path)})
     result = await pipeline.run(context)
-    assert result.step_names()[-1] == "record"
+    assert result.step_names() == (
+        "collect",
+        "unpack_repositories",
+        "persist_repositories",
+        "record",
+    )
     assert log == ["ran"]
 
 
@@ -528,9 +535,7 @@ async def test_analysis_run_is_marked_failed_when_analysis_step_raises(
     def fail_analysis() -> None:
         raise RuntimeError("synthetic analyzer failure")
 
-    failing_step = CallableStep(
-        "synthetic_failure", fail_analysis, output_key="unused"
-    )
+    failing_step = CallableStep("synthetic_failure", fail_analysis, output_key="unused")
     pipeline = await build_application(
         config, extra_steps=(failing_step,), persist_analysis_artifacts=True
     )

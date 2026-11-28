@@ -118,6 +118,9 @@ class MemoryQuery:
     Attributes:
         memory_type: If given, only records with exactly this `MemoryRecord.memory_type` match.
         entity_id: If given, only records with exactly this `MemoryRecord.entity_id` match.
+            `entity_id_is_null` can select records whose entity association is explicitly absent.
+        entity_id_is_null: If True, only records with `entity_id is None` match. Mutually
+            exclusive with a non-None `entity_id`.
         metadata_filter: Exact-match metadata constraints a candidate `MemoryRecord.metadata`
             must satisfy to be eligible -- every key/value pair here must be present, with an
             equal value, in a candidate's own metadata. Empty means no metadata filtering.
@@ -128,6 +131,7 @@ class MemoryQuery:
     entity_id: UUID | None = None
     metadata_filter: dict[str, Any] = field(default_factory=dict)
     limit: int = 100
+    entity_id_is_null: bool = False
 
     def __post_init__(self) -> None:
         """Validate query invariants.
@@ -137,6 +141,8 @@ class MemoryQuery:
         """
         if self.memory_type is not None and not self.memory_type.strip():
             raise ValidationError("MemoryQuery: memory_type must not be empty when given")
+        if self.entity_id is not None and self.entity_id_is_null:
+            raise ValidationError("MemoryQuery: entity_id and entity_id_is_null cannot both be set")
         if self.limit <= 0:
             raise ValidationError(
                 "MemoryQuery: limit must be positive", details={"limit": self.limit}
@@ -289,6 +295,8 @@ def matches_query(record: MemoryRecord, query: MemoryQuery) -> bool:
     if query.memory_type is not None and record.memory_type != query.memory_type:
         return False
     if query.entity_id is not None and record.entity_id != query.entity_id:
+        return False
+    if query.entity_id_is_null and record.entity_id is not None:
         return False
     for key, value in query.metadata_filter.items():
         if record.metadata.get(key) != value:

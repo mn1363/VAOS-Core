@@ -403,3 +403,19 @@ def test_in_memory_memory_store_satisfies_supports_async_close() -> None:
     """A fully-implemented `MemoryStore` should structurally satisfy `SupportsAsyncClose`,
     proving `aclose` integrates with `core.protocols` without formally inheriting from it."""
     assert isinstance(_InMemoryMemoryStore(), SupportsAsyncClose)
+
+
+def test_memory_query_rejects_conflicting_entity_filters() -> None:
+    from src.core.exceptions import ValidationError
+
+    with pytest.raises(ValidationError, match="cannot both be set"):
+        MemoryQuery(entity_id=ENTITY_A, entity_id_is_null=True)
+
+
+def test_memory_query_keeps_existing_positional_argument_order() -> None:
+    query = MemoryQuery(None, ENTITY_A, {"scope": "project"}, 5)
+
+    assert query.entity_id == ENTITY_A
+    assert query.metadata_filter == {"scope": "project"}
+    assert query.limit == 5
+    assert query.entity_id_is_null is False

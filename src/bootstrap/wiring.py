@@ -100,6 +100,7 @@ from src.storage.sqlite.memory import SqliteMemoryStore
 from src.vector.base import VectorStore
 
 from .errors import BootstrapError
+from .memory_steps import build_memory_aware_step
 
 #: Default `storage.backend` when configuration does not specify one.
 _DEFAULT_STORAGE_BACKEND = "filesystem"
@@ -529,6 +530,13 @@ async def build_application(
         output_key="persisted_repository_ids",
         is_async=True,
     )
+    selected_memory_store = memory_store if memory_store is not None else storage.memory_store
+    selected_analysis_steps = list(extra_steps)
+    if selected_analysis_steps:
+        selected_analysis_steps[0] = build_memory_aware_step(
+            selected_analysis_steps[0], selected_memory_store
+        )
+
     steps: list[Step] = [collect_step, unpack_step, persist_step]
     if persist_analysis_artifacts:
         from src.bootstrap.analysis_steps import (
@@ -539,7 +547,8 @@ async def build_application(
         steps.append(build_analysis_run_creation_step(storage.analysis_run_repository))
     if persist_analysis_artifacts:
         steps.extend(
-            _AnalysisRunFailureGuard(step, storage.analysis_run_repository) for step in extra_steps
+            _AnalysisRunFailureGuard(step, storage.analysis_run_repository)
+            for step in selected_analysis_steps
         )
         steps.append(
             _AnalysisRunFailureGuard(
@@ -550,14 +559,13 @@ async def build_application(
             )
         )
     else:
-        steps.extend(extra_steps)
+        steps.extend(selected_analysis_steps)
 
     resources: list[SupportsAsyncClose] = []
     if storage.resource is not None:
         resources.append(storage.resource)
     if vector_store is not None:
         resources.append(vector_store)
-    selected_memory_store = memory_store if memory_store is not None else storage.memory_store
     resources.append(selected_memory_store)
 
     return _application_build_pipeline(_PIPELINE_NAME, steps, resources=resources)

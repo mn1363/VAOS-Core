@@ -100,6 +100,9 @@ async def assert_memory_contract(store: Any) -> None:
     )
     assert filtered.records == (first,)
 
+    unassociated = await store.query(MemoryQuery(entity_id_is_null=True))
+    assert unassociated.record_count == 0
+
     limited = await store.query(MemoryQuery(limit=1))
     assert limited.records == (second,)
 
@@ -112,6 +115,15 @@ async def assert_memory_contract(store: Any) -> None:
     assert not await store.exists(first.id)
     assert (await store.query(MemoryQuery())).record_count == 1
 
+    project_record = MemoryRecord(
+        id=uuid4(),
+        memory_type="project_decision",
+        content={"decision": "keep project-wide knowledge"},
+    )
+    await store.upsert(project_record)
+    unassociated = await store.query(MemoryQuery(entity_id_is_null=True))
+    assert unassociated.records == (project_record,)
+
 
 @pytest.mark.asyncio
 async def test_filesystem_memory_store_contract_and_persistence(tmp_path: Path) -> None:
@@ -120,8 +132,9 @@ async def test_filesystem_memory_store_contract_and_persistence(tmp_path: Path) 
 
     reopened = FilesystemMemoryStore(tmp_path)
     remaining = await reopened.query(MemoryQuery())
-    assert remaining.record_count == 1
-    assert remaining.records[0].content["label"] == "beta"
+    assert remaining.record_count == 2
+    assert any(record.content.get("label") == "beta" for record in remaining.records)
+    assert any(record.memory_type == "project_decision" for record in remaining.records)
     assert json.loads((tmp_path / "memory_records.json").read_text(encoding="utf-8"))
     await store.aclose()
     await reopened.aclose()
@@ -151,8 +164,9 @@ async def test_sqlite_memory_store_contract_and_schema(tmp_path: Path) -> None:
         await initialize_schema(connection)
         reopened = SqliteMemoryStore(connection)
         persisted = await reopened.query(MemoryQuery())
-        assert persisted.record_count == 1
-        assert persisted.records[0].content["label"] == "beta"
+        assert persisted.record_count == 2
+        assert any(record.content.get("label") == "beta" for record in persisted.records)
+        assert any(record.memory_type == "project_decision" for record in persisted.records)
     finally:
         await close_connection(connection)
 
