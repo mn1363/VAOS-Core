@@ -73,6 +73,7 @@ from src.storage.filesystem.driver import (
     FilesystemSourceFileRepository,
     FilesystemSourceRepositoryStore,
 )
+from src.storage.filesystem.memory import FilesystemMemoryStore
 from src.storage.postgres.driver import (
     PostgresAnalysisArtifactStore,
     PostgresAnalysisRunRepository,
@@ -83,6 +84,7 @@ from src.storage.postgres.driver import (
 from src.storage.postgres.driver import close_connection as _postgres_close_connection
 from src.storage.postgres.driver import connect as _postgres_connect
 from src.storage.postgres.driver import initialize_schema as _postgres_initialize_schema
+from src.storage.postgres.memory import PostgresMemoryStore
 from src.storage.qdrant.driver import QdrantVectorStore
 from src.storage.sqlite.driver import (
     SqliteAnalysisArtifactStore,
@@ -94,6 +96,7 @@ from src.storage.sqlite.driver import (
 from src.storage.sqlite.driver import close_connection as _sqlite_close_connection
 from src.storage.sqlite.driver import initialize_schema as _sqlite_initialize_schema
 from src.storage.sqlite.driver import open_connection as _sqlite_open_connection
+from src.storage.sqlite.memory import SqliteMemoryStore
 from src.vector.base import VectorStore
 
 from .errors import BootstrapError
@@ -192,7 +195,7 @@ class _AnalysisRunFailureGuard(Step):
 
 @dataclass(frozen=True, slots=True)
 class StorageBundle:
-    """The five concrete entity-persistence Ports for one configured storage backend.
+    """The concrete persistence Ports for one configured storage backend.
 
     Attributes:
         source_repository_store: Concrete `SourceRepositoryStore` for the selected backend.
@@ -200,6 +203,7 @@ class StorageBundle:
         analysis_run_repository: Concrete `AnalysisRunRepository` for the selected backend.
         finding_repository: Concrete `FindingRepository` for the selected backend.
         analysis_artifact_store: Concrete `AnalysisArtifactStore` for the selected backend.
+        memory_store: Concrete `MemoryStore` for the selected backend.
         resource: A `SupportsAsyncClose` adapter for the backend's own backing connection, or
             None for a backend (`"filesystem"`) with no connection to release.
     """
@@ -209,6 +213,7 @@ class StorageBundle:
     analysis_run_repository: AnalysisRunRepository
     finding_repository: FindingRepository
     analysis_artifact_store: AnalysisArtifactStore
+    memory_store: MemoryStore
     resource: SupportsAsyncClose | None
 
 
@@ -294,7 +299,7 @@ async def build_storage(config: AppConfig) -> StorageBundle:
             (required, no default).
 
     Returns:
-        A `StorageBundle` holding the five concrete Ports and, for `"sqlite"`/`"postgres"`, a
+        A `StorageBundle` holding the concrete Ports and, for `"sqlite"`/`"postgres"`, a
         `SupportsAsyncClose` resource wrapping the backing connection.
 
     Raises:
@@ -313,6 +318,7 @@ async def build_storage(config: AppConfig) -> StorageBundle:
             analysis_run_repository=FilesystemAnalysisRunRepository(root),
             finding_repository=FilesystemFindingRepository(root),
             analysis_artifact_store=FilesystemAnalysisArtifactStore(root),
+            memory_store=FilesystemMemoryStore(root),
             resource=None,
         )
 
@@ -327,6 +333,7 @@ async def build_storage(config: AppConfig) -> StorageBundle:
             analysis_run_repository=SqliteAnalysisRunRepository(sqlite_connection),
             finding_repository=SqliteFindingRepository(sqlite_connection),
             analysis_artifact_store=SqliteAnalysisArtifactStore(sqlite_connection),
+            memory_store=SqliteMemoryStore(sqlite_connection),
             resource=_CallbackCloser(
                 functools.partial(_sqlite_close_connection, sqlite_connection)
             ),
@@ -347,14 +354,14 @@ async def build_storage(config: AppConfig) -> StorageBundle:
             analysis_run_repository=PostgresAnalysisRunRepository(postgres_connection),
             finding_repository=PostgresFindingRepository(postgres_connection),
             analysis_artifact_store=PostgresAnalysisArtifactStore(postgres_connection),
+            memory_store=PostgresMemoryStore(postgres_connection),
             resource=_CallbackCloser(
                 functools.partial(_postgres_close_connection, postgres_connection)
             ),
         )
 
     raise BootstrapError(
-        f"unknown storage.backend '{backend}'; expected one of "
-        "'filesystem', 'sqlite', 'postgres'",
+        f"unknown storage.backend '{backend}'; expected one of 'filesystem', 'sqlite', 'postgres'",
         details={"backend": backend},
     )
 
@@ -386,9 +393,7 @@ async def build_vector_store(config: AppConfig) -> VectorStore | None:
             "vector.enabled is true but 'vector.qdrant.url' is not configured",
             details={},
         )
-    collection_name = str(
-        config.get("vector.qdrant.collection_name", _DEFAULT_VECTOR_COLLECTION)
-    )
+    collection_name = str(config.get("vector.qdrant.collection_name", _DEFAULT_VECTOR_COLLECTION))
     vector_size = int(config.get("vector.qdrant.vector_size", _DEFAULT_VECTOR_SIZE))
     api_key = config.get("vector.qdrant.api_key")
     client = AsyncQdrantClient(url=str(url), api_key=str(api_key) if api_key else None)
@@ -534,8 +539,7 @@ async def build_application(
         steps.append(build_analysis_run_creation_step(storage.analysis_run_repository))
     if persist_analysis_artifacts:
         steps.extend(
-            _AnalysisRunFailureGuard(step, storage.analysis_run_repository)
-            for step in extra_steps
+            _AnalysisRunFailureGuard(step, storage.analysis_run_repository) for step in extra_steps
         )
         steps.append(
             _AnalysisRunFailureGuard(
@@ -553,8 +557,8 @@ async def build_application(
         resources.append(storage.resource)
     if vector_store is not None:
         resources.append(vector_store)
-    if memory_store is not None:
-        resources.append(memory_store)
+    selected_memory_store = memory_store if memory_store is not None else storage.memory_store
+    resources.append(selected_memory_store)
 
     return _application_build_pipeline(_PIPELINE_NAME, steps, resources=resources)
 
@@ -606,9 +610,7 @@ async def bootstrap(
         if context is not None
         else PipelineContext(
             values={
-                "source": str(
-                    resolved_config.get("collectors.source", _DEFAULT_COLLECTOR_SOURCE)
-                )
+                "source": str(resolved_config.get("collectors.source", _DEFAULT_COLLECTOR_SOURCE))
             }
         )
     )

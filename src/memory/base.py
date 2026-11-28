@@ -7,9 +7,9 @@ module defines exactly that contract -- `MemoryRecord` (a single piece of stored
 optionally tied to a domain entity by id), the query/result shapes (`MemoryQuery`,
 `MemoryQueryResult`), and the abstract `MemoryStore` Port itself -- and nothing more. It does not
 implement a database, file store, or cache, does not add any external dependency, and does not
-decide how a concrete store is wired up at runtime; those are a future storage driver's concerns,
+decide how a concrete store is wired up at runtime; those concerns are implemented by concrete drivers in src.storage,
 built against this Port via Dependency Inversion, the same relationship `vector.base.VectorStore`
-has to its own not-yet-built concrete backends.
+has to its own concrete backends.
 
 Every `MemoryRecord` carries an optional `entity_id: UUID | None` tying it back to an existing
 `domain.entities.Entity.id` (e.g. a `SourceRepository.id` or `AnalysisRun.id`), when the knowledge

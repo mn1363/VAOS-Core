@@ -3,8 +3,7 @@
 These tests statically inspect every `src.storage` module's import *statements* (via `ast`,
 without executing them -- see `test_imports.py` for execution-based import verification) to
 verify Phase 10's dependency rules hold: no forbidden layer is imported, every `src.*` import
-resolves to one of storage's explicitly allowed layers (`core`, `domain`, `vector`, and
-`storage` itself), and -- since `storage` is meant to sit as an outer/leaf layer nothing else
+resolves to one of storage's explicitly allowed layers (core, domain, vector, memory, and storage itself), and -- since `storage` is meant to sit as an outer/leaf layer nothing else
 depends on -- no other already-frozen `src` package imports anything from `src.storage`.
 
 Both absolute (`from src.storage.base import X`) and relative (`from ..base import X`) imports
@@ -32,7 +31,6 @@ _FORBIDDEN_PREFIXES = (
     "src.graph",
     "src.foundation",
     "src.repository",
-    "src.memory",
     "src.pipeline",
     "src.plugins",
     "src.api",
@@ -45,6 +43,7 @@ _ALLOWED_PREFIXES = (
     "src.core",
     "src.domain",
     "src.vector",
+    "src.memory",
     "src.storage",
 )
 

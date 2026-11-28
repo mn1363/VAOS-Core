@@ -155,6 +155,13 @@ CREATE INDEX IF NOT EXISTS ix_analysis_artifacts_repository_id
     ON analysis_artifacts (repository_id);
 CREATE INDEX IF NOT EXISTS ix_analysis_artifacts_run_type
     ON analysis_artifacts (analysis_run_id, artifact_type);
+
+CREATE TABLE IF NOT EXISTS memory_records (
+    id TEXT PRIMARY KEY, memory_type TEXT NOT NULL, content TEXT NOT NULL,
+    metadata TEXT NOT NULL, entity_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_memory_records_type ON memory_records (memory_type);
+CREATE INDEX IF NOT EXISTS ix_memory_records_entity_id ON memory_records (entity_id);
 """
 
 _SOURCE_REPOSITORY_COLUMNS = (
